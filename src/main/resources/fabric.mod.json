@@ -1,0 +1,29 @@
+{
+	"schemaVersion": 1,
+	"id": "clay",
+	"version": "${version}",
+	"name": "Clay",
+	"description": "Library: use Blender (glTF/.glb) models for items, blocks and entities, and film cinematic camera shots.",
+	"authors": ["gnottero"],
+	"contact": {
+		"homepage": "https://github.com/Gnottero/Clay",
+		"sources": "https://github.com/Gnottero/Clay",
+		"issues": "https://github.com/Gnottero/Clay/issues"
+	},
+	"license": "MIT",
+	"icon": "assets/clay/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"client": ["dev.gnottero.clay.ClayClient"]
+	},
+	"mixins": [{"config": "clay.mixins.json", "environment": "client"}],
+	"depends": {
+		"fabricloader": ">=0.20.0",
+		"minecraft": ">=26.4-alpha.0",
+		"java": ">=25",
+		"fabric-api": "*"
+	},
+	"custom": {
+		"modmenu": { "badges": ["library"] }
+	}
+}
