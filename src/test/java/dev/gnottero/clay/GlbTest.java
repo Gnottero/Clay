@@ -98,6 +98,20 @@ class GlbTest {
 			+ "\"meshes\":[{\"primitives\":[" + String.join(",", java.util.Collections.nCopies(20, "{\"attributes\":{\"POSITION\":0}}"))
 			+ "]}],\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}]}";
 		assertThrows(java.io.IOException.class, () -> Glb.read(withBin(glb(reused), verts * 12)));
+		// one 2 MB bufferView copied out as 100 images
+		int png = 2 << 20;
+		String images = "{\"buffers\":[{}],\"bufferViews\":[{\"buffer\":0,\"byteLength\":" + png + "}],\"images\":["
+			+ String.join(",", java.util.Collections.nCopies(100, "{\"bufferView\":0}")) + "]}";
+		assertThrows(java.io.IOException.class, () -> Glb.read(withBin(glb(images), png)));
+		// 3 MB of byte indices decode to 12 MB but would bake into 192 MB of quads
+		int indices = 3_000_000;
+		String triangles = "{\"buffers\":[{}],\"bufferViews\":[{\"buffer\":0,\"byteLength\":12},{\"buffer\":0,\"byteOffset\":12,\"byteLength\":" + indices + "}],"
+			+ "\"accessors\":[{\"bufferView\":0,\"count\":1,\"type\":\"VEC3\",\"componentType\":5126},{\"bufferView\":1,\"count\":" + indices + ",\"type\":\"SCALAR\",\"componentType\":5121}],"
+			+ "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]}],\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}]}";
+		assertThrows(java.io.IOException.class, () -> Glb.read(withBin(glb(triangles), 12 + indices)));
+		// fixed-size arrays that are too short would crash at bake time
+		assertThrows(java.io.IOException.class, () -> Glb.read(glb("{\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorFactor\":[1]}}]}")));
+		assertThrows(java.io.IOException.class, () -> Glb.read(glb("{\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"rotation\":[0]}]}")));
 		byte[] badChunk = glb("{}");
 		java.nio.ByteBuffer.wrap(badChunk).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(12, -8);
 		assertThrows(java.io.IOException.class, () -> Glb.read(badChunk));

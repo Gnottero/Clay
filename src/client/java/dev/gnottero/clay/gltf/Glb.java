@@ -71,13 +71,16 @@ public final class Glb {
 
 	/** Deeper node hierarchies are rejected so a crafted file can't overflow the stack. */
 	private static final int MAX_DEPTH = 256;
-	/** Total floats decoded per file (64 MB); counts every decode, so accessors or meshes reused many times can't multiply past it. */
-	private static final long MAX_FLOATS = 1 << 24;
+	/**
+	 * Memory a file may make Clay hold (128 MB): every image copy, every accessor decode and the quads each primitive bakes
+	 * into later, so images, accessors or meshes reused many times can't multiply past it.
+	 */
+	private static final long MAX_BYTES = 1 << 27;
 
 	private final JsonObject json;
 	private final ByteBuffer bin;
 	private boolean[] visited;
-	private long decodedFloats;
+	private long spentBytes;
 
 	private Glb(JsonObject json, ByteBuffer bin) throws IOException {
 		this.json = json;
@@ -90,6 +93,7 @@ public final class Glb {
 			JsonObject image = e.getAsJsonObject();
 			if (image.has("bufferView")) {
 				ByteBuffer view = bufferView(image.get("bufferView").getAsInt());
+				spend(view.remaining());
 				byte[] bytes = new byte[view.remaining()];
 				view.get(bytes);
 				images.add(bytes);
@@ -115,11 +119,11 @@ public final class Glb {
 		JsonObject node = array(json, "nodes").get(gltfIndex).getAsJsonObject();
 		Matrix4f local = new Matrix4f();
 		if (node.has("matrix")) {
-			local.set(floats(node.getAsJsonArray("matrix")));
+			local.set(floats(node.getAsJsonArray("matrix"), 16));
 		} else {
-			float[] t = node.has("translation") ? floats(node.getAsJsonArray("translation")) : new float[3];
-			float[] r = node.has("rotation") ? floats(node.getAsJsonArray("rotation")) : new float[] {0, 0, 0, 1};
-			float[] s = node.has("scale") ? floats(node.getAsJsonArray("scale")) : new float[] {1, 1, 1};
+			float[] t = node.has("translation") ? floats(node.getAsJsonArray("translation"), 3) : new float[3];
+			float[] r = node.has("rotation") ? floats(node.getAsJsonArray("rotation"), 4) : new float[] {0, 0, 0, 1};
+			float[] s = node.has("scale") ? floats(node.getAsJsonArray("scale"), 3) : new float[] {1, 1, 1};
 			local.translationRotateScale(new Vector3f(t), new Quaternionf(r[0], r[1], r[2], r[3]), new Vector3f(s));
 		}
 		Matrix4f global = parent < 0 ? new Matrix4f(local) : new Matrix4f(nodes.get(parent).global()).mul(local);
@@ -169,16 +173,18 @@ public final class Glb {
 			throw new IOException("Vertex attributes have mismatched counts");
 		for (int i : indices) if (i < 0 || i >= n) throw new IOException("Vertex index " + i + " out of range (" + n + " vertices)");
 		if (material < -1 || material >= materials.size()) throw new IOException("Material " + material + " out of range");
+		// what Quads.build allocates for it: every vertex at full stride, and in the worst case a 4-vertex quad per triangle
+		spend(((long) n * Quads.STRIDE + (long) indices.length / 3 * 4 * Quads.STRIDE) * Float.BYTES);
 		return new Primitive(positions, normals, uvs, colors, indices, material);
 	}
 
-	private Material material(JsonObject m) {
+	private Material material(JsonObject m) throws IOException {
 		String name = m.has("name") ? m.get("name").getAsString() : "material" + materials.size();
 		float[] baseColor = {1, 1, 1, 1};
 		int image = -1;
 		if (m.has("pbrMetallicRoughness")) {
 			JsonObject pbr = m.getAsJsonObject("pbrMetallicRoughness");
-			if (pbr.has("baseColorFactor")) baseColor = floats(pbr.getAsJsonArray("baseColorFactor"));
+			if (pbr.has("baseColorFactor")) baseColor = floats(pbr.getAsJsonArray("baseColorFactor"), 4);
 			if (pbr.has("baseColorTexture")) image = textureImage(pbr.getAsJsonObject("baseColorTexture"));
 			if (pbr.has("metallicRoughnessTexture")) warnings.add("Material '" + name + "': metallic/roughness maps are ignored by vanilla shaders");
 		}
@@ -187,7 +193,7 @@ public final class Glb {
 		AlphaMode alpha = m.has("alphaMode") ? AlphaMode.valueOf(m.get("alphaMode").getAsString()) : AlphaMode.OPAQUE;
 		boolean doubleSided = m.has("doubleSided") && m.get("doubleSided").getAsBoolean();
 		boolean emissive = m.has("emissiveTexture");
-		if (m.has("emissiveFactor")) for (float f : floats(m.getAsJsonArray("emissiveFactor"))) emissive |= f > 0;
+		if (m.has("emissiveFactor")) for (float f : floats(m.getAsJsonArray("emissiveFactor"), 3)) emissive |= f > 0;
 		if (image >= images.size()) {
 			warnings.add("Material '" + name + "': image " + image + " does not exist");
 			image = -1;
@@ -250,8 +256,7 @@ public final class Glb {
 		// checked before allocating, so the declared count can't exceed what the file actually holds
 		if (count < 0 || base < 0 || stride < size * components || count > 0 && (long) base + (long) (count - 1) * stride + size * components > view.remaining())
 			throw new IOException("Accessor " + index + " reads past its bufferView");
-		decodedFloats += (long) count * components;
-		if (decodedFloats > MAX_FLOATS) throw new IOException("Model decodes to more than " + MAX_FLOATS + " floats");
+		spend((long) count * components * Float.BYTES);
 		float[] out = new float[count * components];
 
 		for (int i = 0; i < count; i++) {
@@ -288,7 +293,14 @@ public final class Glb {
 		return o.has(key) ? o.getAsJsonArray(key) : new JsonArray();
 	}
 
-	private static float[] floats(JsonArray a) {
+	private void spend(long bytes) throws IOException {
+		spentBytes += bytes;
+		if (spentBytes > MAX_BYTES) throw new IOException("Model needs more than " + (MAX_BYTES >> 20) + " MB");
+	}
+
+	/** A fixed-size JSON number array, such as a color or a transform. */
+	private static float[] floats(JsonArray a, int size) throws IOException {
+		if (a.size() != size) throw new IOException("Expected " + size + " numbers, got " + a.size() + ": " + a);
 		float[] out = new float[a.size()];
 		for (int i = 0; i < out.length; i++) out[i] = a.get(i).getAsFloat();
 		return out;
