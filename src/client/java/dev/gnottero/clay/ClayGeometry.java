@@ -24,14 +24,20 @@ import net.minecraft.resources.Identifier;
 import net.minecraft.util.ARGB;
 import net.minecraft.util.GsonHelper;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.joml.Vector3f;
 import org.slf4j.Logger;
+
+import java.util.Collections;
+import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Block/item geometry baked from a .glb, used through a model json:
  * <pre>{"fabric:type": "clay:gltf", "model": "mymod:statue", "parent": "minecraft:block/block"}</pre>
  * Everything else in the json (parent, display, textures.particle, ambientocclusion, gui_light) works as in vanilla.
- * Baked once per resource reload into a Fabric Renderer mesh, so the per-frame cost is zero.
+ * Baked once per resource reload and blockstate rotation into a Fabric Renderer mesh, so the per-frame cost is zero.
  * <p>
  * Model space: Blender origin = bottom center of the block, so a 1x1x1 cube spans x,z in [-0.5, 0.5], y in [0, 1].
  */
@@ -52,6 +58,11 @@ public record ClayGeometry(Identifier model) implements UnbakedGeometry {
 	/** Plain white sprite for untextured materials (shipped in assets/clay/textures/block/white.png). */
 	static final Identifier WHITE = Identifier.fromNamespaceAndPath("clay", "block/white");
 	private static final float EPS = 1e-4f;
+	/**
+	 * Meshes by file and blockstate rotation, so any number of model jsons pointing at one heavy .glb bake it once. The
+	 * file is held weakly: every resource reload loads new ones. Models bake in parallel, hence the synchronized maps.
+	 */
+	private static final Map<Glb, Map<Matrix4fc, QuadCollection>> BAKED = Collections.synchronizedMap(new WeakHashMap<>());
 
 	@Override
 	public QuadCollection bake(TextureSlots slots, ModelBaker baker, ModelState state, ModelDebugName name) {
@@ -60,7 +71,11 @@ public record ClayGeometry(Identifier model) implements UnbakedGeometry {
 			LOGGER.error("[clay] Model {} references missing or broken assets/{}/clay/{}.glb", name.debugName(), model.getNamespace(), model.getPath());
 			return QuadCollection.EMPTY;
 		}
+		Matrix4f rotation = new Matrix4f(state.transformation().getMatrix());
+		return BAKED.computeIfAbsent(glb, g -> new ConcurrentHashMap<>()).computeIfAbsent(rotation, r -> bake(glb, r, baker, name));
+	}
 
+	private QuadCollection bake(Glb glb, Matrix4fc rotation, ModelBaker baker, ModelDebugName name) {
 		Material.Baked[] sprites = new Material.Baked[glb.materials.size() + 1];
 		for (int m = -1; m < glb.materials.size(); m++) {
 			Glb.Material mat = glb.material(m);
@@ -71,7 +86,7 @@ public record ClayGeometry(Identifier model) implements UnbakedGeometry {
 		// Block-space transform: Blender origin (bottom center) -> block corner, then blockstate rotation about the center.
 		Matrix4f transform = new Matrix4f()
 			.translate(0.5f, 0.5f, 0.5f)
-			.mul(state.transformation().getMatrix())
+			.mul(rotation)
 			.translate(0, -0.5f, 0);
 
 		MutableMesh mesh = Renderer.get().mutableMesh();
