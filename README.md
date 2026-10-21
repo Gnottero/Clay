@@ -173,7 +173,7 @@ For block entities there's one more overload of `submit` that takes the render s
 
 ## Cinematic camera
 
-`ClayCamera` takes control of the local player's camera for a scripted shot, like a cutscene or a big ability going off. While a shot plays the camera follows your path, the player model is visible in the shot, the HUD and hand are hidden, and the player can't walk around.
+`ClayCamera` takes control of the local player's camera for a scripted shot, like a cutscene or a big ability going off. While a shot plays the camera follows your path, the player model is visible in the shot, the HUD and hand are hidden, the player can't walk around, and effects that change how the world looks (blindness, darkness, nausea and night vision) are hidden so they don't spoil the shot.
 
 The quickest way to get something good looking is an orbit around the action:
 

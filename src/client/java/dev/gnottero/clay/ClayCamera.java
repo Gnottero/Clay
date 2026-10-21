@@ -10,7 +10,8 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * Cinematic camera for the local player. While a shot plays the camera follows its {@link Path} (detached, so the player
- * is drawn in it), the HUD and hand are hidden and the player stands still. It stops after its length in game ticks, on
+ * is drawn in it), the HUD and hand are hidden, the player stands still, and the effects that change how the world looks
+ * (blindness, darkness, nausea, night vision) are hidden. It stops after its length in game ticks, on
  * {@link #stop()}, or when the player leaves the level it started in.
  */
 public final class ClayCamera {
