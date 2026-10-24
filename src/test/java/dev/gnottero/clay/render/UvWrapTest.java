@@ -48,4 +48,13 @@ class UvWrapTest {
 		new UvWrap().triangle(verts, 0, 1, 2, (poly, a, b, c, d) -> pieces[0]++);
 		assertEquals(1, pieces[0]);
 	}
+
+	@Test
+	void clampsUvsTooLargeToTile() {
+		float[] verts = new float[3 * UvWrap.V];
+		for (int i = 0; i < 3; i++) verts[i * UvWrap.V + 6] = 2.2e9f; // far past an int, with no span at all
+		int[] pieces = {0};
+		new UvWrap().triangle(verts, 0, 1, 2, (poly, a, b, c, d) -> pieces[0]++);
+		assertEquals(1, pieces[0]);
+	}
 }

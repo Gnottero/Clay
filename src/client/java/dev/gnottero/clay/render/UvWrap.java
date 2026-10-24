@@ -14,6 +14,8 @@ final class UvWrap {
 	private static final int MAX = 8;
 	/** Tiles one triangle may span before its UVs are clamped instead: real models repeat a texture a few times at most. */
 	private static final int MAX_TILES = 64;
+	/** Largest UV cut into tiles; beyond it a float can't hold a position within a tile. */
+	private static final float MAX_UV = 1e6f;
 
 	interface Emit {
 		/** Called with 3 or 4 vertices (a quad, possibly repeating its last vertex) from {@code poly}, UVs within 0-1. */
@@ -28,7 +30,9 @@ final class UvWrap {
 		System.arraycopy(verts, b * V, tri, V, V);
 		System.arraycopy(verts, c * V, tri, 2 * V, V);
 		float minU = min(tri, U), maxU = max(tri, U), minV = min(tri, U + 1), maxV = max(tri, U + 1);
-		if (!Float.isFinite(minU + maxU + minV + maxV) || (maxU - minU + 1) * (maxV - minV + 1) > MAX_TILES) {
+		// huge UVs also go to the clamp: past about 2^31 the tile numbers below would overflow, and floats lose the fraction anyway
+		if (!(Math.max(Math.abs(minU), Math.abs(maxU)) <= MAX_UV && Math.max(Math.abs(minV), Math.abs(maxV)) <= MAX_UV)
+			|| (maxU - minU + 1) * (maxV - minV + 1) > MAX_TILES) {
 			// absurd UVs (a broken or hostile file): clamp rather than cut into millions of pieces every frame
 			for (int i = 0; i < 3; i++) {
 				tri[i * V + U] = Float.isFinite(tri[i * V + U]) ? Math.clamp(tri[i * V + U], 0f, 1f) : 0;
