@@ -30,12 +30,23 @@ public final class ClayAssets implements SpriteSource {
 	private static final Logger LOGGER = LogUtils.getLogger();
 	private static final FileToIdConverter GLB = new FileToIdConverter("clay", ".glb");
 	private static volatile Map<Identifier, Glb> loaded = Map.of();
+	private static volatile int generation;
 
 	private ClayAssets() {}
 
 	/** The parsed model for {@code ns:path} ({@code assets/ns/clay/path.glb}), or null if missing or broken. */
 	public static @Nullable Glb get(Identifier model) {
 		return loaded.get(model);
+	}
+
+	/** Counts resource reloads, so caches can tell their data is stale. */
+	public static int generation() {
+		return generation;
+	}
+
+	/** Every loaded model, for /clay. */
+	public static Map<Identifier, Glb> all() {
+		return loaded;
 	}
 
 	public static Identifier spriteId(Identifier model, int image) {
@@ -60,6 +71,7 @@ public final class ClayAssets implements SpriteSource {
 			}
 		});
 		loaded = next;
+		generation++;
 	}
 
 	@Override

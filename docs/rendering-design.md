@@ -64,9 +64,9 @@ Both use the same palette, computed by the same Java code (node hierarchy, anima
 
 ### The GPU path in detail
 
-- **Vertex buffer** (40 bytes per vertex): `Position` RGB32F, `Color` RGBA8, `UV0` RG32F, `Normal` RGBA8_SNORM (w = 1 for emissive, which makes the shader use full-bright light like the CPU path), `Joints` RGBA16_UINT, `Weights` RGBA8_UNORM. Quads are drawn as two triangles from a 32-bit index buffer.
+- **Vertex buffer** (40 bytes per vertex): `Position` RGB32F, `Color` RGBA8, `UV0` RG32F, `Normal` RGBA8_SNORM (w unused), `Joints` RGBA16_UINT, `Weights` RGBA8_UNORM. Quads are drawn as two triangles from a 32-bit index buffer.
 - **Palette**: a `TEXEL_BUFFER` uniform (`ClayPalette`, RGBA32_FLOAT, four texels per matrix). Renderpearl has no storage buffers, and a uniform buffer is capped at 64 KB per binding; a texel buffer is the closest thing to a storage buffer the API offers and has no practical size limit.
-- **Instances**: a second vertex buffer with step rate 1: `PaletteBase` (where this instance's matrices start), `Light`, `Overlay`, `Tint`. One `drawIndexed(..., instanceCount, ...)` draws every instance of a mesh part in the group.
+- **Instances**: a second vertex buffer with step rate 1, one `RGBA32_SINT` per instance: where its palette starts, packed light, packed overlay and tint. Emissive parts are a part of their own and get full-bright light in their instance data, like the CPU path. One `drawIndexed(..., instanceCount, ...)` draws every instance of a mesh part in the group; the instance range is selected by offsetting the vertex buffer slice, because `firstInstance` isn't guaranteed (`DeviceFeatures.nonZeroFirstInstance`).
 - **Upload**: `prepareGroup` collects instances; `finishPrepare` uploads the frame's palette and instance data with `transientMemory().uploadGpu`, before the render pass opens. `executeGroup` binds and draws.
 - **Normals**: transformed by the upper 3×3 of the blended matrix and normalized. That is exact for rotations and uniform scale; a non-uniformly scaled node gets slightly tilted normals (both renderers do the same thing, so they still match).
 - **Breaking cracks** (`crumbling`) stay on the CPU path in both renderers: they only draw while a player mines the block, and they need vanilla's decal render types.
@@ -78,7 +78,13 @@ Both use the same palette, computed by the same Java code (node hierarchy, anima
 - a shader-pack mod is loaded (`iris`, `oculus`, `optifabric`): they replace vanilla's entity shaders and wouldn't apply to Clay's pipeline,
 - Clay's pipelines failed to compile on this device, or creating the GPU buffers threw.
 
-The decision is made once per resource reload and logged once as a warning when it falls back. `gpu` forces the GPU renderer unless it can't work at all (then it still falls back, with an error). `/clay` (client command) prints the active renderer, the loaded models with quad counts, and the GPU memory Clay holds.
+The decision is made once per resource reload (and logged at info level), with one warning the first time it falls back. `gpu` forces the GPU renderer unless it can't work at all (then it still falls back, with an error). If a pipeline lookup or a buffer upload fails mid-frame, Clay switches to the CPU renderer until the next reload. `/clay` (client command) prints the active renderer, the loaded models with quad counts, and the GPU memory Clay holds; `/clay renderer auto|gpu|cpu` switches at runtime.
+
+Meshes are uploaded on their first draw after a reload rather than during the reload itself: the atlas UVs are only known once the block atlas is stitched, and a model nobody draws then costs no GPU memory.
+
+### Verification
+
+`./gradlew runClientGameTest` starts a client with a test mod (`src/gametest`) that draws `showcase.glb` (textured, vertex colored, cutout, translucent and emissive parts, made by `tools/make_test_models.py` in Blender), screenshots it with each renderer, with Improved Transparency off and on, and fails if the screenshots differ in more than 0.2% of pixels. On the development machine they are identical without OIT and differ in 0.05% of pixels (blending order along edges) with it.
 
 ### Constraints that shape later phases
 

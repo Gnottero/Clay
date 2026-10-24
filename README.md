@@ -9,7 +9,7 @@ It also has a cinematic camera for cutscenes and dramatic ability shots, since t
 ## What you get
 
 - glTF binary (`.glb`) models as **blocks and items**, through ordinary model json files. Blockstate rotations, display transforms and parents work as you'd expect.
-- **Entity and block entity** rendering with `ClayModel`, including per-part transforms for animation and an optional low-detail model for distant entities.
+- **Entity and block entity** rendering with `ClayModel`, drawn from meshes kept on the GPU, including per-part transforms for animation and an optional low-detail model for distant entities.
 - Textures, vertex colors, cutout and translucent materials, double-sided faces and emissive (glowing) materials, all read from the Blender material.
 - A **cinematic camera** (`ClayCamera`) that takes over the player's view for a scripted shot.
 
@@ -167,9 +167,18 @@ Every object in your Blender scene becomes a node, named after the object. The m
 
 `MODEL.bounds()` gives you the bounding box of the model at rest, which is handy for sizing the entity's culling box.
 
-Opaque and cutout materials draw with `entityCutoutCull`, translucent ones with `entityTranslucentCull`, and double-sided materials use the matching no-cull variants.
-
 For block entities there's one more overload of `submit` that takes the render state's `breakProgress`. Pass it along and the block breaking cracks show up on your model while the player mines it.
+
+### Renderers
+
+Clay has two ways of drawing a `ClayModel`, and picks one by itself:
+
+- The **GPU renderer** uploads each model once after a resource reload and keeps it on the graphics card. Each frame it only sends the position of every part, and draws all copies of a model in one go. It uses vanilla's entity shader for the lighting, the hurt flash, fog and transparency (including Improved Transparency), so models look the same as before.
+- The **CPU renderer** sends every vertex through vanilla's entity render types each frame, as Clay always did: opaque and cutout materials with `entityCutoutCull`, translucent ones with `entityTranslucentCull`, double-sided materials with the no-cull variants.
+
+The GPU renderer is used unless a shader-pack mod (Iris, Oculus, OptiFabric) is installed or the graphics driver can't compile Clay's shader. Then Clay logs one warning and uses the CPU renderer. You can force either with the JVM argument `-Dclay.renderer=gpu` or `-Dclay.renderer=cpu` (`auto` is the default).
+
+In game, `/clay` shows which renderer is active and why, how much GPU memory Clay uses, and every entity model drawn since the last reload with its quad count. `/clay renderer auto|gpu|cpu` switches renderers on the fly, which is handy for comparing them.
 
 ## Cinematic camera
 
@@ -197,13 +206,14 @@ The camera is purely client side and only affects the local player. If your scen
 
 ## Performance notes
 
+Entity models drawn by the GPU renderer cost one small upload per model per frame, however many vertices they have, and every copy of the same model is a single draw call. The CPU renderer's cost grows with the vertex count of every copy, so it's the one to keep in mind if you see Clay in a profiler and `/clay` says it's in use.
+
 Block and item models are baked once per resource reload into Fabric Renderer meshes, so they cost nothing extra per frame. Clay also merges Blender's triangle pairs back into quads and marks faces that lie on a block boundary so neighbouring blocks can cull them. Give your block a matching `VoxelShape` so it hides its neighbours properly too.
 
 The one limit worth knowing about is the polygon budget for blocks. **Keep block models under about 220 quads.** Every placed block copies its quads into the mesh of its chunk section, and each section uploads through a fixed 98 MB buffer. At 112 bytes per quad, a section completely filled with a 220-quad block just fits. Go much heavier and the game crashes with `Cannot fit allocation ... into staging buffer` once enough copies end up in one section (a 9,000-quad block fails at around 90 copies). If you need a high-poly block, give it a simple block model and draw the detailed version with a block entity and `ClayModel`, using `.lod()` for distance.
 
 ## Known limitations
 
-- Entity meshes are streamed from the CPU every frame. That's fine for a reasonable number of entities. Keeping them on the GPU would be the next step if profiling ever shows it matters.
 - There's no skeletal or Blender animation support. Animate by passing node transforms instead.
 - Only embedded PNG textures are supported, and textures can't tile because they live in an atlas.
 
@@ -213,8 +223,11 @@ You'll need JDK 25 and git.
 
 ```sh
 ./gradlew build    # builds build/libs/clay-0.1.0.jar and runs the tests
-./gradlew test     # just the unit tests: the .glb parser, quad merging and cull-face detection
+./gradlew test     # just the unit tests: the .glb parser, quad merging, cull-face detection and mesh baking
+./gradlew runClientGameTest   # opens the game, draws the test models with both renderers and compares screenshots
 ```
+
+The test models in `src/gametest` are made by `blender -b -P tools/make_test_models.py`.
 
 ## License
 

@@ -18,6 +18,18 @@ loom {
 	}
 }
 
+// ./gradlew runClientGameTest: renders the models in src/gametest with both renderers and compares the screenshots.
+// The gametest source set is a separate test mod, never part of Clay's jar.
+fabricApi {
+	configureTests {
+		createSourceSet = true
+		modId = "clay_test"
+		enableGameTests = false
+		enableClientGameTests = true
+		eula = true
+	}
+}
+
 // Wired after loom {} because splitEnvironmentSourceSets() creates the client source set.
 sourceSets {
 	test {

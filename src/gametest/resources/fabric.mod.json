@@ -1,0 +1,17 @@
+{
+	"schemaVersion": 1,
+	"id": "clay_test",
+	"version": "1.0.0",
+	"name": "Clay game test",
+	"description": "Draws Clay's test models and checks both renderers agree. Not shipped.",
+	"license": "MIT",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["dev.gnottero.clay.test.ClayTestScene"],
+		"fabric-client-gametest": ["dev.gnottero.clay.test.ClayGameTest"]
+	},
+	"depends": {
+		"clay": "*",
+		"fabric-api": "*"
+	}
+}
