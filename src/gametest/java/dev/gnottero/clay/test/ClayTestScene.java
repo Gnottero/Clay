@@ -26,6 +26,7 @@ public final class ClayTestScene implements ClientModInitializer {
 	/** Skinned models, each frozen in a pose, standing in a row from {@link #skinned}; null hides them. */
 	static volatile @Nullable Vec3 skinned;
 	static final List<ClayAnimator> POSES = new ArrayList<>();
+	static final ClayModel STAGE = ClayModel.of(Identifier.fromNamespaceAndPath("clay_test", "stage"));
 	static final ClayModel MATERIALS = ClayModel.of(Identifier.fromNamespaceAndPath("clay_test", "materials"));
 	/** Copies of the materials model, each with its own look and the showcase attached at its socket; null hides them. */
 	static volatile @Nullable Vec3 materials;

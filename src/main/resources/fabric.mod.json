@@ -14,6 +14,7 @@
 	"icon": "assets/clay/icon.png",
 	"environment": "*",
 	"entrypoints": {
+		"main": ["dev.gnottero.clay.ClayMod"],
 		"client": ["dev.gnottero.clay.ClayClient"]
 	},
 	"mixins": [{"config": "clay.mixins.json", "environment": "client"}],

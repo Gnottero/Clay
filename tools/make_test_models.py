@@ -12,12 +12,15 @@ Writes to src/gametest/resources/assets/clay_test/clay/:
              texture scrolls (clay_scroll), a screen with a 4-frame animated texture (clay_frametime) and a hidden
              "collision" box around the pedestal
   orb        a 528-quad sphere block model: over the chunk budget, for the warning, simplification and voxelization
+  stage      a pillar with two cameras: "intro" dollies round it in 2 seconds and rolls 20 degrees at the end (35 mm
+             lens), "still" looks at it from the front
 """
 import math
 import os
 
 import bmesh
 import bpy
+from mathutils import Quaternion, Vector
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "gametest", "resources", "assets", "clay_test", "clay")
 
@@ -218,7 +221,38 @@ def orb():
     export("orb")
 
 
+def look(loc, target, roll=0.0):
+    """Rotation of a camera at `loc` looking at `target`, rolled `roll` degrees about its view axis."""
+    q = (Vector(target) - Vector(loc)).to_track_quat("-Z", "Y")
+    return (q @ Quaternion((0, 0, 1), math.radians(roll))).to_euler()
+
+
+def stage():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.context.scene.render.fps = 20
+    stone = material("stone", image("stone", 4, lambda x, y: (0.8, 0.3, 0.3, 1) if (x + y) % 2 else (0.9, 0.9, 0.9, 1)))
+    cube("pillar", stone, (0, 0, 0), size=1)
+
+    target = (0, 0, 0.5)
+    for name, loc in (("intro", (0, -6, 2)), ("still", (0, -5, 1))):
+        data = bpy.data.cameras.new(name)
+        data.lens = 35
+        cam = bpy.data.objects.new(name, data)
+        bpy.context.scene.collection.objects.link(cam)
+        cam.location = loc
+        cam.rotation_euler = look(loc, target)
+    intro = bpy.data.objects["intro"]
+    start, end = (0, -6, 2), (6, 0, 3)
+    keys = []
+    for frame, loc, roll in ((0, start, 0), (40, end, 20)):
+        rot = look(loc, target, roll)
+        keys += [(frame, "location", i, loc[i]) for i in range(3)] + [(frame, "rotation_euler", i, rot[i]) for i in range(3)]
+    action(intro, "intro_move", keys, "LINEAR")
+    export("stage", export_cameras=True, export_animation_mode="ACTIONS", export_force_sampling=False)
+
+
 showcase()
 skinned()
 materials()
 orb()
+stage()

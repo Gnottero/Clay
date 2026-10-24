@@ -15,7 +15,7 @@ It also has a cinematic camera for cutscenes and dramatic ability shots, since t
 - **Per-instance looks**: tint a copy of a model or swap its textures without loading it twice.
 - **Sockets**: empties in Blender become attachment points for held items, other models and particles, and follow the animation.
 - **Block shapes** made from the model, for collision and outlines, on the server too.
-- A **cinematic camera** (`ClayCamera`) that takes over the player's view for a scripted shot.
+- A **cinematic camera** (`ClayCamera`) that takes over the player's view for a scripted shot: keyframed spline paths with easing, field of view and roll, shake, fades and letterbox bars, sequences of shots, cameras animated in Blender, and shots started by the server.
 
 ## Adding Clay to your mod
 
@@ -295,7 +295,71 @@ A shot ends when its time is up, when you call `ClayCamera.stop()`, or when the 
 
 `orbit` pulls the camera in front of any wall between it and the target. Custom paths don't get that for free, so keep it in mind if your shot can end up inside terrain.
 
-The camera is purely client side and only affects the local player. If your scene also needs gameplay changes, like freezing mobs or making the player invulnerable while it plays, that part is up to your mod.
+A `Shot` can also set the field of view (vertical, in degrees; 0 keeps the player's) and roll the picture: `Shot.lookAt(pos, target).withFov(50).withRoll(10)`.
+
+### Keyframes
+
+The examples below import `ClayCamera`'s nested types (`Shot`, `Clip`, `Easing`, `Transition`, ...). Rather than writing the maths yourself, give the camera a few keyframes and let a spline join them:
+
+```java
+ClayCamera.play(ClayCamera.keyframes()
+    .key(0,  Shot.lookAt(a, target))
+    .key(40, Shot.lookAt(b, target).withFov(50), Easing.IN_OUT_SINE)   // easing shapes the way into this key
+    .key(80, Shot.lookAt(c, target).withRoll(15), Easing.OUT_CUBIC)
+    .catmullRom());                                                     // or .linear(), or .bezier()
+```
+
+Catmull-Rom runs smoothly through every key. Bezier uses handles you give a key with `key(new Key(tick, shot, easing, handleIn, handleOut))`, and keys without handles behave like Catmull-Rom. Angles always turn the short way round, so going from yaw 350 to 10 doesn't spin the camera the long way. The easings are the usual set: `LINEAR`, and `IN_`, `OUT_` and `IN_OUT_` versions of `SINE`, `QUAD`, `CUBIC`, `EXPO` and `BACK`.
+
+### Effects and sequences
+
+Every playable thing is a `Clip`, and clips take effects:
+
+```java
+Clip intro = keys
+    .letterbox(0.12f, 10, 10)    // bars 12% of the screen high, sliding in and out over 10 ticks
+    .fade(20, 20, 0x000000)      // from black over the first 20 ticks, to black over the last 20
+    .shake(1.5f, 6)              // up to about 1.5°, 6 times a second
+    .onStart(() -> playSound())  // callbacks run on the client
+    .onEnd(() -> openDoor());    // also when the shot is stopped or replaced
+```
+
+Chain clips into a sequence. Each clip after the first picks how it takes over: a hard `CUT`, a `BLEND` where the camera glides from where the last clip ended, or a `FADE` through black:
+
+```java
+ClayCamera.play(ClayCamera.sequence()
+    .then(establishing)
+    .then(closeUp, Transition.BLEND, 20)
+    .then(ARENA.camera("intro"), Transition.FADE, 30)   // any Clip, including other sequences
+    .build());
+```
+
+A `Path` you wrote yourself becomes a clip with `new ClayCamera.Timed(path, ticks)`.
+
+### Cameras from Blender
+
+Animate a camera in Blender and export it along with the scene (tick **Include > Cameras**, and keep the camera's action like any other animation). Then play it:
+
+```java
+static final ClayModel ARENA = ClayModel.of(Identifier.fromNamespaceAndPath("mymod", "arena"));
+
+ClayCamera.play(ARENA.camera("intro").at(arenaCenter, 90));   // the Blender origin at arenaCenter, turned 90°
+```
+
+The camera's position, rotation (roll included) and lens come across, moving as the first animation that moves the camera or its parents. A camera that doesn't move needs a length: `ARENA.camera("still").length(60)`. The `.glb` doesn't need any meshes; a file with just cameras works.
+
+### Starting a shot from the server
+
+Clips made from data, which is everything above except callbacks and paths you wrote in code, can be sent to a player:
+
+```java
+ClayCamera.playFor(serverPlayer, ARENA_INTRO);   // a Clip built with keyframes(), orbit(), camera() or sequence()
+ClayCamera.stopFor(serverPlayer);
+```
+
+This works on dedicated servers. Players without Clay are skipped. A server-side `ClayCamera.camera(modelId, name)` works as long as the client has the model.
+
+The camera only moves the local player's view. If your scene also needs gameplay changes, like freezing mobs or making the player invulnerable while it plays, that part is up to your mod.
 
 ## Performance notes
 
@@ -310,6 +374,7 @@ Clay logs a warning with the model's name and quad count when a block model goes
 ## Known limitations
 
 - Shape keys (morph targets) aren't supported. Clay skips them with a warning in the log.
+- A Blender camera's lens is read once, so animating its focal length doesn't zoom the shot. Animate `withFov` keyframes instead.
 - Only embedded PNG textures are supported, and textures can't tile because they live in an atlas (scrolling textures on entities are the exception).
 
 ## Building from source
@@ -318,8 +383,9 @@ You'll need JDK 25 and git.
 
 ```sh
 ./gradlew build    # builds build/libs/clay-0.1.0.jar and runs the tests
-./gradlew test     # just the unit tests: the .glb parser, quad merging, cull-face detection and mesh baking
-./gradlew runClientGameTest   # opens the game, draws the test models with both renderers and compares screenshots
+./gradlew test     # just the unit tests: the .glb reader, meshes, skinning, animation, materials, shapes and camera maths
+./gradlew runClientGameTest   # opens the game: draws the test models with both renderers and compares screenshots,
+                              # then checks shapes, animated textures and the camera (including a server-started shot)
 ```
 
 The test models in `src/gametest` are made by `blender -b -P tools/make_test_models.py`.

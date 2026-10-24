@@ -68,6 +68,9 @@ public final class Glb {
 	 */
 	public record Channel(int node, Path path, Interpolation interpolation, float[] times, float[] values) {}
 
+	/** A perspective camera on node {@code node} (named like it), looking down its -Z with +Y up; {@code yfov} in radians. */
+	public record Camera(String name, int node, float yfov) {}
+
 	/** A named clip; {@code duration} is the last key time of any channel. */
 	public record Animation(String name, float duration, List<Channel> channels) {}
 
@@ -75,6 +78,7 @@ public final class Glb {
 	public final List<Material> materials = new ArrayList<>();
 	public final List<Skin> skins = new ArrayList<>();
 	public final List<Animation> animations = new ArrayList<>();
+	public final List<Camera> cameras = new ArrayList<>();
 	/** Raw encoded image bytes (PNG), indexed like the glTF {@code images} array. Null when not embedded. */
 	public final List<byte[]> images = new ArrayList<>();
 	/** Non-fatal problems the caller should log. */
@@ -248,6 +252,11 @@ public final class Glb {
 		String name = node.has("name") ? node.get("name").getAsString() : "node" + gltfIndex;
 		int self = nodes.size();
 		nodes.add(new Node(name, parent, local, global, primitives, node.has("skin") ? node.get("skin").getAsInt() : -1));
+		if (node.has("camera")) {
+			JsonObject camera = array(json, "cameras").get(node.get("camera").getAsInt()).getAsJsonObject();
+			if (camera.has("perspective")) cameras.add(new Camera(name, self, camera.getAsJsonObject("perspective").get("yfov").getAsFloat()));
+			else warnings.add("Camera '" + name + "' is orthographic, which Minecraft can't show");
+		}
 		for (JsonElement child : array(node, "children")) addNode(child.getAsInt(), self, depth + 1);
 	}
 

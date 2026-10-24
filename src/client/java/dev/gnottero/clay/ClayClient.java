@@ -4,6 +4,9 @@ import dev.gnottero.clay.render.ClayMesh;
 import dev.gnottero.clay.render.ClayRenderers;
 import dev.gnottero.clay.render.GpuRenderer;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
+import net.minecraft.client.Minecraft;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommands;
 import net.fabricmc.fabric.api.client.model.loading.v1.UnbakedModelDeserializer;
@@ -20,6 +23,10 @@ public final class ClayClient implements ClientModInitializer {
 		SpriteSourceRegistry.register(Identifier.fromNamespaceAndPath("clay", "gltf"), ClayAssets.CODEC);
 		UnbakedModelDeserializer.register(ClayGeometry.TYPE, ClayGeometry.DESERIALIZER);
 		GpuRenderer.register();
+		ClayCamera.clientLevel = () -> Minecraft.getInstance().level;
+		ClayCamera.models = ClayAssets::get;
+		ClientPlayNetworking.registerGlobalReceiver(ClayCamera.Payload.TYPE, (payload, context) -> payload.clip().ifPresentOrElse(ClayCamera::play, ClayCamera::stop));
+		ClientTickEvents.END_CLIENT_TICK.register(client -> ClayCamera.tick());
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, context) -> {
 			var renderer = ClientCommands.literal("renderer");
 			for (String mode : new String[] {"auto", "gpu", "cpu"}) {

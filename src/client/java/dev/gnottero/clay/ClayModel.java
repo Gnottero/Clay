@@ -209,6 +209,11 @@ public final class ClayModel {
 		}
 	}
 
+	/** The Blender camera named {@code name} in this model, to play with {@link ClayCamera#play(ClayCamera.Clip)}. See {@link ClayCamera#camera}. */
+	public ClayCamera.ModelCamera camera(String name) {
+		return ClayCamera.camera(id, name);
+	}
+
 	/** A new instance (animator, tint, texture swaps) of this model. */
 	public ClayInstance instance() {
 		return new ClayInstance(this);

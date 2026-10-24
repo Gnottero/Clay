@@ -1,6 +1,7 @@
 package dev.gnottero.clay.test;
 
 import dev.gnottero.clay.ClayAnimator;
+import dev.gnottero.clay.ClayCamera;
 import dev.gnottero.clay.render.ClayRenderers;
 import dev.gnottero.clay.render.GpuRenderer;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
@@ -10,12 +11,16 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContex
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.util.Mth;
 import org.joml.Matrix4f;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.List;
 
 /**
  * Run with ./gradlew runClientGameTest. Draws the test models with the GPU renderer and the CPU renderer, with and without
@@ -100,7 +105,72 @@ public final class ClayGameTest implements FabricClientGameTest {
 			Path after = context.takeScreenshot("animated_1");
 			if (differing(before, after) < 0.001) throw new AssertionError("animated and scrolling textures didn't move");
 			ClayTestScene.materials = null;
+
+			cameras(context, server);
 		}
+	}
+
+	/** ClayCamera: keyframes with field of view, roll, fade and letterbox; a Blender camera; a server-started shot; callbacks. */
+	private static void cameras(ClientGameTestContext context, TestServerContext server) {
+		Vec3 pillar = new Vec3(0.5, -60, -1);
+		// frozen time holds the shot still, so the camera can be checked against the clip
+		server.runCommand("tick freeze");
+		ClayCamera.Keyframes keys = ClayCamera.keyframes()
+			.key(0, ClayCamera.Shot.lookAt(new Vec3(-6, -57, -6), pillar))
+			.key(100, ClayCamera.Shot.lookAt(new Vec3(6, -56, -6), pillar).withFov(40).withRoll(25), ClayCamera.Easing.IN_OUT_SINE)
+			.catmullRom();
+		// a shot held still part way along the path, so the frame's partial tick can't move it between here and the check
+		ClayCamera.Shot held = keys.at(70).withFov(45);
+		context.runOnClient(mc -> ClayCamera.play(ClayCamera.keyframes().key(0, held).key(1000, held).linear().letterbox(0.12f, 0, 0)));
+		context.waitTicks(3);
+		context.runOnClient(mc -> {
+			if (!ClayCamera.playing()) throw new AssertionError("shot isn't playing");
+			ClayCamera.Shot shot = ClayCamera.shot(mc.getDeltaTracker().getGameTimeDeltaPartialTick(false));
+			var camera = mc.gameRenderer.mainCamera();
+			if (camera.position().distanceTo(shot.pos()) > 1e-3) throw new AssertionError("camera at " + camera.position() + ", shot at " + shot.pos());
+			if (shot.fov() > 0 && Math.abs(camera.getFov() - shot.fov()) > 1e-3) throw new AssertionError("fov " + camera.getFov() + " for " + shot.fov());
+			Vector3f up = camera.rotation().transform(new Vector3f(0, 1, 0)), level = new Quaternionf()
+				.rotationYXZ((float) Math.PI - shot.yRot() * Mth.DEG_TO_RAD, -shot.xRot() * Mth.DEG_TO_RAD, shot.roll() * Mth.DEG_TO_RAD).transform(new Vector3f(0, 1, 0));
+			if (up.distance(level) > 1e-3) throw new AssertionError("camera roll doesn't match the shot");
+		});
+		// partway along: rolled, zoomed and letterboxed
+		context.runOnClient(mc -> ClayCamera.play(ClayCamera.keyframes().key(0, keys.at(70)).key(1000, keys.at(70)).linear().letterbox(0.12f, 0, 0)));
+		context.waitTicks(2);
+		context.takeScreenshot("camera_keyframes");
+		context.runOnClient(mc -> ClayCamera.play(ClayCamera.keyframes().key(0, keys.at(70)).key(1000, keys.at(70)).linear().fade(0, 2000, 0x000000)));
+		context.waitTicks(2);
+		context.takeScreenshot("camera_fade_half");
+
+		// the camera Blender animated, placed over the pillar
+		var intro = ClayTestScene.STAGE.camera("intro").at(new Vec3(0.5, -60, -1), 0);
+		context.runOnClient(mc -> ClayCamera.play(intro));
+		context.waitTicks(2);
+		context.runOnClient(mc -> {
+			var camera = mc.gameRenderer.mainCamera();
+			if (intro.length() != 40) throw new AssertionError("intro lasts " + intro.length());
+			if (camera.position().distanceTo(new Vec3(0.5, -58, 5)) > 0.5) throw new AssertionError("intro starts at " + camera.position());
+		});
+		context.takeScreenshot("camera_blender");
+		context.runOnClient(mc -> ClayCamera.stop());
+		server.runCommand("tick unfreeze");
+
+		// a shot started by the server, then stopped by it
+		ClayCamera.Clip orbit = new ClayCamera.Timed(ClayCamera.orbit(pillar, 8, 0, 25, 2), 200);
+		server.runOnServer(s -> ClayCamera.playFor(s.getPlayerList().getPlayers().getFirst(), orbit));
+		context.waitTicks(3);
+		if (!context.computeOnClient(mc -> ClayCamera.playing())) throw new AssertionError("server shot didn't start");
+		server.runOnServer(s -> ClayCamera.stopFor(s.getPlayerList().getPlayers().getFirst()));
+		context.waitTicks(3);
+		if (context.computeOnClient(mc -> ClayCamera.playing())) throw new AssertionError("server shot didn't stop");
+
+		// callbacks run in order as a sequence plays through
+		List<String> log = new java.util.concurrent.CopyOnWriteArrayList<>();
+		ClayCamera.Clip a = new ClayCamera.Timed(orbit::at, 6).onStart(() -> log.add("a start")).onEnd(() -> log.add("a end"));
+		ClayCamera.Clip b = intro.length(6).onStart(() -> log.add("b start")).onEnd(() -> log.add("b end"));
+		context.runOnClient(mc -> ClayCamera.play(ClayCamera.sequence().then(a).then(b, ClayCamera.Transition.FADE, 4).build()));
+		context.waitTicks(16);
+		if (!log.equals(List.of("a start", "a end", "b start", "b end"))) throw new AssertionError("callbacks ran as " + log);
+		if (context.computeOnClient(mc -> ClayCamera.playing())) throw new AssertionError("sequence didn't end");
 	}
 
 	/** An animator holding {@code clip} at {@code seconds}. */
