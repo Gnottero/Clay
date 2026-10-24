@@ -25,8 +25,13 @@ public final class Glb {
 	public enum AlphaMode { OPAQUE, MASK, BLEND }
 
 	/** @param baseColor RGBA factor; @param image index into {@link #images}, or -1 for untextured. */
-	public record Material(String name, float[] baseColor, int image, AlphaMode alphaMode, boolean doubleSided, boolean emissive, boolean ao) {
-		static final Material DEFAULT = new Material("default", new float[] {1, 1, 1, 1}, -1, AlphaMode.OPAQUE, false, false, true);
+	/**
+	 * Custom properties: {@code clay_ao} (false = no ambient occlusion), {@code clay_scroll} ([u, v] texture widths per
+	 * second, null if not set) and {@code clay_frametime} (ticks per frame of an animated texture, 0 = not animated).
+	 */
+	public record Material(String name, float[] baseColor, int image, AlphaMode alphaMode, boolean doubleSided, boolean emissive, boolean ao,
+						   float[] scroll, int frametime) {
+		static final Material DEFAULT = new Material("default", new float[] {1, 1, 1, 1}, -1, AlphaMode.OPAQUE, false, false, true, null, 0);
 	}
 
 	/**
@@ -106,6 +111,8 @@ public final class Glb {
 	 * into later, so images, accessors or meshes reused many times can't multiply past it.
 	 */
 	private static final long MAX_BYTES = 1 << 27;
+	/** Nodes plus skin joints: the GPU renderer addresses them with 16-bit indices. */
+	public static final int MAX_PALETTE = 65535;
 
 	private final JsonObject json;
 	private final ByteBuffer bin;
@@ -113,6 +120,7 @@ public final class Glb {
 	/** {@link #nodes} index of each glTF node, -1 for nodes outside the scene. */
 	private int[] nodeIndex;
 	private long spentBytes;
+	private int paletteEntries;
 
 	private Glb(JsonObject json, ByteBuffer bin) throws IOException {
 		this.json = json;
@@ -164,6 +172,10 @@ public final class Glb {
 	private Skin skin(JsonObject s) throws IOException {
 		String name = s.has("name") ? s.get("name").getAsString() : "skin" + skins.size();
 		JsonArray jointArray = array(s, "joints");
+		paletteEntries += jointArray.size();
+		if (paletteEntries > MAX_PALETTE) throw new IOException("More than " + MAX_PALETTE + " nodes and skin joints");
+		// the joint list, its inverse bind matrices and the palette matrices a Rig keeps for them
+		spend((long) jointArray.size() * (Integer.BYTES + 2 * 16 * Float.BYTES));
 		int[] joints = new int[jointArray.size()];
 		for (int i = 0; i < joints.length; i++) joints[i] = node(jointArray.get(i).getAsInt(), "Skin '" + name + "'");
 		Matrix4f[] inverseBind = new Matrix4f[joints.length];
@@ -223,6 +235,7 @@ public final class Glb {
 		Matrix4f global = parent < 0 ? new Matrix4f(local) : new Matrix4f(nodes.get(parent).global()).mul(local);
 
 		nodeIndex[gltfIndex] = nodes.size();
+		if (++paletteEntries > MAX_PALETTE) throw new IOException("More than " + MAX_PALETTE + " nodes and skin joints");
 		List<Primitive> primitives = new ArrayList<>();
 		if (node.has("mesh")) {
 			JsonObject mesh = array(json, "meshes").get(node.get("mesh").getAsInt()).getAsJsonObject();
@@ -303,9 +316,16 @@ public final class Glb {
 			warnings.add("Material '" + name + "': image " + image + " does not exist");
 			image = -1;
 		}
-		boolean ao = true;
-		if (m.has("extras") && m.getAsJsonObject("extras").has("clay_ao")) ao = m.getAsJsonObject("extras").get("clay_ao").getAsBoolean();
-		return new Material(name, baseColor, image, alpha, doubleSided, emissive, ao);
+		JsonObject extras = m.has("extras") && m.get("extras").isJsonObject() ? m.getAsJsonObject("extras") : new JsonObject();
+		boolean ao = !extras.has("clay_ao") || extras.get("clay_ao").getAsBoolean();
+		float[] scroll = extras.has("clay_scroll") ? floats(extras.getAsJsonArray("clay_scroll"), 2) : null;
+		int frametime = extras.has("clay_frametime") ? Math.max(0, extras.get("clay_frametime").getAsInt()) : 0;
+		return new Material(name, baseColor, image, alpha, doubleSided, emissive, ao, scroll, frametime);
+	}
+
+	/** Objects named {@code collision} (or {@code collision.001}, ...) describe a block's shape for ClayShapes and aren't drawn. */
+	public static boolean isCollision(Node node) {
+		return node.name().startsWith("collision");
 	}
 
 	public Material material(int index) {

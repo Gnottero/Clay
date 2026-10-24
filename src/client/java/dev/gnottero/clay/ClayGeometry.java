@@ -28,7 +28,10 @@ import org.joml.Matrix4fc;
 import org.joml.Vector3f;
 import org.slf4j.Logger;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,21 +40,27 @@ import java.util.concurrent.ConcurrentHashMap;
  * Block/item geometry baked from a .glb, used through a model json:
  * <pre>{"fabric:type": "clay:gltf", "model": "mymod:statue", "parent": "minecraft:block/block"}</pre>
  * Everything else in the json (parent, display, textures.particle, ambientocclusion, gui_light) works as in vanilla.
+ * {@code "simplify": true} (or a quad count) merges nearby vertices until the model fits the chunk budget of
+ * {@value #BLOCK_BUDGET} quads (or that count). Objects named {@code collision} aren't drawn.
  * Baked once per resource reload and blockstate rotation into a Fabric Renderer mesh, so the per-frame cost is zero.
  * <p>
  * Model space: Blender origin = bottom center of the block, so a 1x1x1 cube spans x,z in [-0.5, 0.5], y in [0, 1].
  */
-public record ClayGeometry(Identifier model) implements UnbakedGeometry {
+public record ClayGeometry(Identifier model, int simplify) implements UnbakedGeometry {
+	/** Quads a block model can have before a chunk section full of it overflows the section upload buffer (see README). */
+	public static final int BLOCK_BUDGET = 220;
 	public static final Identifier TYPE = Identifier.fromNamespaceAndPath("clay", "gltf");
 	public static final UnbakedModelDeserializer DESERIALIZER = (json, context) -> {
 		Identifier model = Identifier.parse(GsonHelper.getAsString(json, "model"));
+		int simplify = !json.has("simplify") ? 0 : json.get("simplify").getAsJsonPrimitive().isBoolean()
+			? (json.get("simplify").getAsBoolean() ? BLOCK_BUDGET : 0) : Math.max(1, json.get("simplify").getAsInt());
 		JsonObject copy = json.deepCopy();
 		if (!copy.has("textures")) copy.add("textures", new JsonObject());
 		JsonObject textures = copy.getAsJsonObject("textures");
 		if (!textures.has("particle")) textures.addProperty("particle", ClayAssets.spriteId(model, 0).toString());
 
 		CuboidModel base = new CuboidModel.Deserializer().deserialize(copy, CuboidModel.class, context);
-		return new CuboidModel(new ClayGeometry(model), base.guiLight(), base.ambientOcclusion(), base.transforms(), base.textureSlots(), base.parent());
+		return new CuboidModel(new ClayGeometry(model, simplify), base.guiLight(), base.ambientOcclusion(), base.transforms(), base.textureSlots(), base.parent());
 	};
 
 	private static final Logger LOGGER = LogUtils.getLogger();
@@ -62,7 +71,12 @@ public record ClayGeometry(Identifier model) implements UnbakedGeometry {
 	 * Meshes by file and blockstate rotation, so any number of model jsons pointing at one heavy .glb bake it once. The
 	 * file is held weakly: every resource reload loads new ones. Models bake in parallel, hence the synchronized maps.
 	 */
-	private static final Map<Glb, Map<Matrix4fc, QuadCollection>> BAKED = Collections.synchronizedMap(new WeakHashMap<>());
+	private static final Map<Glb, Map<Key, QuadCollection>> BAKED = Collections.synchronizedMap(new WeakHashMap<>());
+	/** Files already warned about, so a heavy model warns once per reload rather than once per rotation. */
+	private static final Set<Glb> WARNED = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+	private static final Set<Glb> SCROLL_WARNED = Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+
+	private record Key(Matrix4fc rotation, int simplify) {}
 
 	@Override
 	public QuadCollection bake(TextureSlots slots, ModelBaker baker, ModelState state, ModelDebugName name) {
@@ -72,7 +86,7 @@ public record ClayGeometry(Identifier model) implements UnbakedGeometry {
 			return QuadCollection.EMPTY;
 		}
 		Matrix4f rotation = new Matrix4f(state.transformation().getMatrix());
-		return BAKED.computeIfAbsent(glb, g -> new ConcurrentHashMap<>()).computeIfAbsent(rotation, r -> bake(glb, r, baker, name));
+		return BAKED.computeIfAbsent(glb, g -> new ConcurrentHashMap<>()).computeIfAbsent(new Key(rotation, simplify), k -> bake(glb, rotation, baker, name));
 	}
 
 	private QuadCollection bake(Glb glb, Matrix4fc rotation, ModelBaker baker, ModelDebugName name) {
@@ -89,25 +103,46 @@ public record ClayGeometry(Identifier model) implements UnbakedGeometry {
 			.mul(rotation)
 			.translate(0, -0.5f, 0);
 
+		List<Quads.Quad> quads = new ArrayList<>();
+		for (Glb.Node node : glb.nodes) {
+			if (Glb.isCollision(node)) continue;
+			Matrix4f nodeToBlock = new Matrix4f(transform).mul(node.global());
+			for (Glb.Primitive primitive : node.primitives()) quads.addAll(Quads.build(glb, primitive, nodeToBlock));
+		}
+		int count = count(glb, quads);
+		if (simplify > 0 && count > simplify) {
+			quads = Quads.simplify(quads, quads.size() * simplify / count);
+			if (WARNED.add(glb)) LOGGER.info("[clay] {}: simplified from {} to {} quads", model, count, count(glb, quads));
+		} else if (count > BLOCK_BUDGET && WARNED.add(glb)) {
+			LOGGER.warn("[clay] {} has {} quads; block models over about {} can crash chunk uploads when many share a chunk section. "
+				+ "Add \"simplify\": true to its model json, or draw it with a block entity and ClayModel", model, count, BLOCK_BUDGET);
+		}
+
+		if (glb.materials.stream().anyMatch(m -> m.scroll() != null) && SCROLL_WARNED.add(glb)) {
+			LOGGER.warn("[clay] {}: clay_scroll only moves textures on ClayModel entities; block and item models stay still", model);
+		}
+
 		MutableMesh mesh = Renderer.get().mutableMesh();
 		QuadEmitter emitter = mesh.emitter();
 		boolean warnedUv = false;
-		for (Glb.Node node : glb.nodes) {
-			Matrix4f nodeToBlock = new Matrix4f(transform).mul(node.global());
-			for (Glb.Primitive primitive : node.primitives()) {
-				Glb.Material mat = glb.material(primitive.material());
-				Material.Baked sprite = sprites[primitive.material() + 1];
-				for (Quads.Quad quad : Quads.build(glb, primitive, nodeToBlock)) {
-					if (!Quads.wrapUvs(quad.v()) && !warnedUv) {
-						LOGGER.warn("[clay] {}: UVs tile past the texture edge; tiling is not supported in the block atlas, clamping", model);
-						warnedUv = true;
-					}
-					emit(emitter, quad.v(), false, mat, sprite, cullFace(quad));
-					if (mat.doubleSided()) emit(emitter, quad.v(), true, mat, sprite, null);
-				}
+		for (Quads.Quad quad : quads) {
+			Glb.Material mat = glb.material(quad.material());
+			Material.Baked sprite = sprites[quad.material() + 1];
+			if (!Quads.wrapUvs(quad.v()) && !warnedUv) {
+				LOGGER.warn("[clay] {}: UVs tile past the texture edge; tiling is not supported in the block atlas, clamping", model);
+				warnedUv = true;
 			}
+			emit(emitter, quad.v(), false, mat, sprite, cullFace(quad));
+			if (mat.doubleSided()) emit(emitter, quad.v(), true, mat, sprite, null);
 		}
 		return new MeshQuadCollection(mesh.immutableCopy());
+	}
+
+	/** Quads as the chunk sees them: double-sided ones twice. */
+	private static int count(Glb glb, List<Quads.Quad> quads) {
+		int count = 0;
+		for (Quads.Quad quad : quads) count += glb.material(quad.material()).doubleSided() ? 2 : 1;
+		return count;
 	}
 
 	private static void emit(QuadEmitter e, float[] v, boolean reversed, Glb.Material mat, Material.Baked sprite, Direction cull) {

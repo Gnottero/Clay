@@ -45,8 +45,8 @@ import java.util.List;
 
 /**
  * Draws {@link ClayMesh}es from GPU buffers. The mesh is uploaded once (per resource reload); each frame only the posed
- * palette of every instance (a texel buffer, 4 texels per matrix) and 16 bytes per instance are uploaded, and every run of
- * instances of one mesh part is a single instanced draw.
+ * palette and material table of every instance (a texel buffer: 4 texels per matrix, 2 per material) and 20 bytes per
+ * instance are uploaded, and every run of instances of one mesh part is a single instanced draw.
  * <p>
  * Instances are submitted as custom nodes into vanilla's solid and translucent phases, so they draw in the same render pass,
  * with the same lighting, overlay, fog and blending as vanilla entities: the vertex shader is Clay's, the fragment shader is
@@ -64,16 +64,20 @@ public final class GpuRenderer implements ClayRenderer {
 		.addAttribute("Normal", GpuFormat.RGBA8_SNORM)
 		.addAttribute("Joints", GpuFormat.RGBA16_UINT)
 		.addAttribute("Weights", GpuFormat.RGBA8_UNORM)
+		.addAttribute("Material", GpuFormat.R32_UINT)
 		.build();
-	/** Per instance: palette start (in texels), packed light, packed overlay, ARGB tint. */
-	private static final VertexFormat INSTANCE_FORMAT = VertexFormat.builder(1).addAttribute("Instance", GpuFormat.RGBA32_SINT).build();
-	private static final int INSTANCE_BYTES = 16;
+	/** Per instance: palette start and material table start (in texels), packed light, packed overlay; then the tint. */
+	private static final VertexFormat INSTANCE_FORMAT = VertexFormat.builder(1)
+		.addAttribute("Instance", GpuFormat.RGBA32_SINT)
+		.addAttribute("Tint", GpuFormat.RGBA8_UNORM)
+		.build();
+	private static final int INSTANCE_BYTES = 20;
 	private static final BindGroupLayout PALETTE = BindGroupLayout.builder().withUniform("ClayPalette", UniformType.TEXEL_BUFFER, GpuFormat.RGBA32_FLOAT).build();
 	private static final Identifier SHADER = Identifier.fromNamespaceAndPath("clay", "core/entity");
 
 	private static final RenderPipeline.Snippet SNIPPET = RenderPipeline.builder(RenderPipelines.MATRICES_FOG_SNIPPET)
 		.withVertexShader(SHADER)
-		.withFragmentShader("core/entity")
+		.withFragmentShader(SHADER)
 		.withBindGroupLayout(BindGroupLayouts.SAMPLER0)
 		.withBindGroupLayout(BindGroupLayouts.SAMPLER1)
 		.withBindGroupLayout(BindGroupLayouts.SAMPLER2)
@@ -93,7 +97,7 @@ public final class GpuRenderer implements ClayRenderer {
 		.withBindGroupLayout(BindGroupLayouts.SAMPLER0)
 		.withBindGroupLayout(PALETTE)
 		.withVertexShader(SHADER)
-		.withFragmentShader("core/entity")
+		.withFragmentShader(SHADER)
 		.withVertexBinding(0, VERTEX)
 		.withVertexBinding(1, INSTANCE_FORMAT)
 		.withPrimitiveTopology(PrimitiveTopology.TRIANGLES)
@@ -170,11 +174,14 @@ public final class GpuRenderer implements ClayRenderer {
 	}
 
 	@Override
-	public void submit(ClayMesh mesh, Matrix4fc[] palette, PoseStack.Pose pose, SubmitNodeCollector collector, int light, int overlay, int tint) {
+	public void submit(ClayMesh mesh, Matrix4fc[] palette, float[] materials, PoseStack.Pose pose, SubmitNodeCollector collector, int light, int overlay, int tint) {
 		Instance instance = POOL.isEmpty() ? new Instance() : POOL.poll();
-		if (instance.palette.length < mesh.paletteSize * 16) instance.palette = new float[mesh.paletteSize * 16];
+		int floats = mesh.paletteSize * 16 + mesh.slots * ClayMesh.MATERIAL_FLOATS;
+		if (instance.palette.length < floats) instance.palette = new float[floats];
 		ClaySkin.pose(pose.pose(), palette, mesh.paletteSize, instance.palette);
+		System.arraycopy(materials, 0, instance.palette, mesh.paletteSize * 16, mesh.slots * ClayMesh.MATERIAL_FLOATS);
 		instance.size = mesh.paletteSize;
+		instance.floats = floats;
 		instance.light = light;
 		instance.overlay = overlay;
 		instance.tint = tint;
@@ -190,7 +197,9 @@ public final class GpuRenderer implements ClayRenderer {
 
 	/** One instance's posed palette and lighting for this frame; pooled, returned when the frame has been drawn. */
 	private static final class Instance {
+		/** The posed palette, then the material table. */
 		float[] palette = new float[16];
+		int floats;
 		/** The mesh this instance last drew and its submit per part, kept so a pooled instance submits without allocating. */
 		@Nullable ClayMesh mesh;
 		Submit[] submits = new Submit[0];
@@ -226,6 +235,7 @@ public final class GpuRenderer implements ClayRenderer {
 				v.put(snorm(mesh.normals[i * 3])).put(snorm(mesh.normals[i * 3 + 1])).put(snorm(mesh.normals[i * 3 + 2])).put((byte) 0);
 				for (int k = 0; k < 4; k++) v.putShort((short) mesh.joints[i * 4 + k]);
 				v.put(mesh.weights, i * 4, 4);
+				v.putInt(mesh.materials[i]);
 			}
 			ByteBuffer ix = ByteBuffer.allocateDirect(mesh.indices.length * 4).order(ByteOrder.LITTLE_ENDIAN);
 			ix.asIntBuffer().put(mesh.indices);
@@ -292,17 +302,19 @@ public final class GpuRenderer implements ClayRenderer {
 		private void write(Submit submit) {
 			Instance instance = submit.instance;
 			if (instance.base < 0) {
-				palette = ensure(palette, instance.size * 64);
+				palette = ensure(palette, instance.floats * 4);
 				instance.base = palette.position() / 16;
-				palette.asFloatBuffer().put(instance.palette, 0, instance.size * 16);
-				palette.position(palette.position() + instance.size * 64);
+				palette.asFloatBuffer().put(instance.palette, 0, instance.floats);
+				palette.position(palette.position() + instance.floats * 4);
 				instances.add(instance);
 			}
+			int tint = instance.tint;
 			instanceData = ensure(instanceData, INSTANCE_BYTES);
 			instanceData.putInt(instance.base)
+				.putInt(instance.base + instance.size * 4)
 				.putInt(submit.part.kind().emissive() ? LightCoordsUtil.FULL_BRIGHT : instance.light)
 				.putInt(instance.overlay)
-				.putInt(instance.tint);
+				.put((byte) (tint >> 16)).put((byte) (tint >> 8)).put((byte) tint).put((byte) (tint >>> 24));
 		}
 
 		private static ByteBuffer ensure(ByteBuffer buffer, int bytes) {

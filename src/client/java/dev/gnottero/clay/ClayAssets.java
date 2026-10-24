@@ -8,6 +8,8 @@ import net.minecraft.resources.FileToIdConverter;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.server.packs.resources.ResourceManager;
+import net.minecraft.server.packs.resources.ResourceMetadata;
+import net.minecraft.client.resources.metadata.animation.AnimationMetadataSection;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 
@@ -15,6 +17,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Atlas sprite source ({@code "type": "clay:gltf"}) that loads every {@code assets/<ns>/clay/<path>.glb}
@@ -64,7 +67,12 @@ public final class ClayAssets implements SpriteSource {
 				next.put(id, glb);
 				for (int i = 0; i < glb.images.size(); i++) {
 					byte[] png = glb.images.get(i);
-					if (png != null) output.add(spriteId(id, i), new Resource(resource.source(), () -> new ByteArrayInputStream(png)));
+					if (png == null) continue;
+					// a material's clay_frametime makes its image a vertical strip of square frames, animated by the atlas like a vanilla .mcmeta
+					int image = i, frametime = glb.materials.stream().filter(m -> m.image() == image).mapToInt(Glb.Material::frametime).max().orElse(0);
+					ResourceMetadata meta = frametime <= 0 ? ResourceMetadata.EMPTY : ResourceMetadata.of(AnimationMetadataSection.TYPE,
+						new AnimationMetadataSection(Optional.empty(), Optional.empty(), Optional.empty(), frametime, false));
+					output.add(spriteId(id, i), new Resource(resource.source(), () -> new ByteArrayInputStream(png), () -> meta));
 				}
 			} catch (Exception e) {
 				LOGGER.error("[clay] Failed to load {}", file, e);

@@ -1,0 +1,6 @@
+{
+	"fabric:type": "clay:gltf",
+	"model": "clay_test:orb",
+	"parent": "minecraft:block/block",
+	"simplify": true
+}

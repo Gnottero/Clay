@@ -65,6 +65,12 @@ public final class Rig {
 		return clips.get(name);
 	}
 
+	/** The index of the node named {@code name}, or -1. */
+	public int node(String name) {
+		for (int i = 0; i < nodeCount; i++) if (glb.nodes.get(i).name().equals(name)) return i;
+		return -1;
+	}
+
 	public Map<String, Glb.Animation> clips() {
 		return clips;
 	}

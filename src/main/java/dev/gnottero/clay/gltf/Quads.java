@@ -116,6 +116,72 @@ public final class Quads {
 		}
 	}
 
+	/**
+	 * Cuts {@code quads} down to about {@code target} by vertex clustering: positions are snapped together on a grid that
+	 * gets coarser until few enough quads survive. Quads whose corners merge become triangles or disappear; UVs, colors and
+	 * normals stay as they were. Crude next to a proper decimator, but it keeps the silhouette and never adds geometry.
+	 */
+	public static List<Quad> simplify(List<Quad> quads, int target) {
+		if (quads.size() <= target || quads.isEmpty()) return quads;
+		Vector3f min = new Vector3f(Float.MAX_VALUE), max = new Vector3f(-Float.MAX_VALUE), p = new Vector3f();
+		for (Quad q : quads) {
+			for (int i = 0; i < 4; i++) {
+				min.min(p.set(q.x(i), q.y(i), q.z(i)));
+				max.max(p);
+			}
+		}
+		float extent = Math.max(max.x - min.x, Math.max(max.y - min.y, max.z - min.z));
+		List<Quad> out = quads;
+		// coarsen gently, so the result lands near the target rather than far below it
+		for (int cells = 256; cells >= 1 && out.size() > target; cells = Math.min(cells - 1, cells * 7 / 8)) {
+			out = cluster(quads, min, Math.max(extent, 1e-6f) / cells);
+		}
+		return out;
+	}
+
+	private static List<Quad> cluster(List<Quad> quads, Vector3f origin, float cell) {
+		// each grid cell's vertices move to their average position
+		java.util.Map<Long, float[]> cells = new java.util.HashMap<>();
+		for (Quad q : quads) {
+			for (int i = 0; i < 4; i++) {
+				float[] sum = cells.computeIfAbsent(key(q, i, origin, cell), k -> new float[4]);
+				sum[0] += q.x(i); sum[1] += q.y(i); sum[2] += q.z(i); sum[3]++;
+			}
+		}
+		List<Quad> out = new ArrayList<>();
+		for (Quad q : quads) {
+			long[] keys = new long[4];
+			int[] corners = new int[4];
+			int n = 0;
+			for (int i = 0; i < 4; i++) {
+				long k = key(q, i, origin, cell);
+				if (n > 0 && keys[n - 1] == k) continue;
+				keys[n] = k;
+				corners[n++] = i;
+			}
+			if (n > 1 && keys[n - 1] == keys[0]) n--;
+			if (n < 3) continue; // collapsed to a line or a point
+			float[] v = new float[4 * STRIDE];
+			int[] source = new int[4];
+			for (int i = 0; i < 4; i++) {
+				int from = corners[Math.min(i, n - 1)];
+				System.arraycopy(q.v(), from * STRIDE, v, i * STRIDE, STRIDE);
+				float[] sum = cells.get(keys[Math.min(i, n - 1)]);
+				v[i * STRIDE] = sum[0] / sum[3];
+				v[i * STRIDE + 1] = sum[1] / sum[3];
+				v[i * STRIDE + 2] = sum[2] / sum[3];
+				source[i] = q.source()[from];
+			}
+			out.add(new Quad(v, q.material(), source));
+		}
+		return out;
+	}
+
+	private static long key(Quad q, int i, Vector3f origin, float cell) {
+		long x = (long) Math.floor((q.x(i) - origin.x) / cell), y = (long) Math.floor((q.y(i) - origin.y) / cell), z = (long) Math.floor((q.z(i) - origin.z) / cell);
+		return (x & 0x1FFFFF) << 42 | (y & 0x1FFFFF) << 21 | z & 0x1FFFFF;
+	}
+
 	/** Shifts UVs that tile past 0..1 back into the unit square when the whole quad sits in one tile. */
 	public static boolean wrapUvs(float[] v) {
 		float minU = Float.MAX_VALUE, minV = Float.MAX_VALUE;

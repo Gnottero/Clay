@@ -69,7 +69,7 @@ class GlbTest {
 	}
 
 	/** A minimal .glb around the given JSON, with an empty BIN chunk. */
-	private static byte[] glb(String json) {
+	static byte[] glb(String json) {
 		byte[] j = (json + "    ".substring(json.length() % 4 == 0 ? 4 : json.length() % 4)).getBytes();
 		java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(12 + 8 + j.length).order(java.nio.ByteOrder.LITTLE_ENDIAN);
 		b.putInt(0x46546C67).putInt(2).putInt(b.capacity()).putInt(j.length).putInt(0x4E4F534A).put(j);

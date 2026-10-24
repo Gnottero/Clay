@@ -5,8 +5,9 @@
 	"name": "Clay game test",
 	"description": "Draws Clay's test models and checks both renderers agree. Not shipped.",
 	"license": "MIT",
-	"environment": "client",
+	"environment": "*",
 	"entrypoints": {
+		"main": ["dev.gnottero.clay.test.ClayTestMod"],
 		"client": ["dev.gnottero.clay.test.ClayTestScene"],
 		"fabric-client-gametest": ["dev.gnottero.clay.test.ClayGameTest"]
 	},

@@ -8,6 +8,10 @@ Writes to src/gametest/resources/assets/clay_test/clay/:
   skinned    a column skinned to a two-bone armature, with a rigid cube spinning beside it. Clips: "bend" (the upper
              bone bends, linear), "hop" (the armature jumps, step), "sway" (the upper bone sways, bezier, exported as
              cubic spline) and "spin" (the cube turns, an object animation)
+  materials  a pedestal ("paint" material, for tints and texture swaps) with a "socket_top" empty above it, a panel whose
+             texture scrolls (clay_scroll), a screen with a 4-frame animated texture (clay_frametime) and a hidden
+             "collision" box around the pedestal
+  orb        a 528-quad sphere block model: over the chunk budget, for the warning, simplification and voxelization
 """
 import math
 import os
@@ -176,5 +180,45 @@ def skinned():
     export("skinned", export_animation_mode="ACTIONS", export_force_sampling=False, export_def_bones=True)
 
 
+def materials():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    paint = material("paint", image("paint", 4, lambda x, y: (1, 1, 1, 1) if (x + y) % 2 else (0.8, 0.8, 0.8, 1)))
+    cube("pedestal", paint, (0, 0, 0), size=0.6)
+
+    arrows = image("arrows", 8, lambda x, y: (0.95, 0.85, 0.2, 1) if abs(x - 4) <= 3 - y % 4 else (0.15, 0.15, 0.3, 1))
+    scroll = material("scroll", arrows)
+    scroll["clay_scroll"] = [0.5, 0.0]
+    bpy.ops.mesh.primitive_plane_add(size=0.8, location=(1, 0, 0.4), rotation=(-math.pi / 2, 0, 0))  # facing +Y: north in game, towards the test camera
+    panel = bpy.context.object
+    panel.name = "panel"
+    panel.data.materials.append(scroll)
+
+    # four frames stacked vertically, like a vanilla animated texture: red, green, blue, white
+    frames = [(1, 0.2, 0.2), (0.2, 1, 0.2), (0.2, 0.2, 1), (1, 1, 1)]
+    strip = bpy.data.images.new("strip", 4, 16, alpha=True)
+    strip.pixels = [c for y in range(16) for x in range(4) for c in (*frames[3 - y // 4], 1)]
+    strip.pack()
+    screen = material("screen", strip)
+    screen["clay_frametime"] = 5
+    cube("screen", screen, (-1, 0, 0), size=0.6)
+
+    bpy.ops.object.empty_add(location=(0, 0, 0.9))
+    bpy.context.object.name = "socket_top"
+    collision = cube("collision", paint, (0, 0, 0), size=0.7)
+    collision.hide_set(True)
+    collision.hide_render = True
+    export("materials", export_extras=True)
+
+
+def orb():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=24, radius=0.45, location=(0, 0, 0.5))
+    bpy.context.object.name = "orb"
+    bpy.context.object.data.materials.append(material("stone", image("stone", 4, lambda x, y: (0.6, 0.6, 0.65, 1))))
+    export("orb")
+
+
 showcase()
 skinned()
+materials()
+orb()

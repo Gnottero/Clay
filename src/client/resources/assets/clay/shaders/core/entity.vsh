@@ -1,10 +1,11 @@
 #version 330
 #extension GL_ARB_separate_shader_objects : require
 
-// Clay's entity vertex shader. It writes the same outputs as vanilla's core/entity.vsh, which it is paired with
-// core/entity.fsh for, but its vertices come from a mesh kept on the GPU: each one follows up to four entries of a
-// per-instance palette of matrices (one per node or skin joint, already posed and camera-relative) instead of arriving
-// posed from the CPU. ClaySkin.java is the same math for the CPU renderer; keep them in step.
+// Clay's entity vertex shader. It writes the same outputs as vanilla's core/entity.vsh, but its vertices come from a mesh
+// kept on the GPU: each one follows up to four entries of a per-instance palette of matrices (one per node or skin joint,
+// already posed and camera-relative) instead of arriving posed from the CPU. Its UVs are within the material's image; the
+// instance's material table says which atlas rectangle that is and how far it has scrolled (see entity.fsh).
+// ClaySkin.java and CpuRenderer.java are the same math for the CPU renderer; keep them in step.
 
 #if defined(PER_FACE_LIGHTING) || !defined(NO_CARDINAL_LIGHTING)
 #include <minecraft:light.glsl>
@@ -20,8 +21,10 @@ layout(location = 2) in vec2 UV0;
 layout(location = 3) in vec3 Normal;
 layout(location = 4) in uvec4 Joints;
 layout(location = 5) in vec4 Weights;
-// per instance: palette start (in texels), packed light, packed overlay, ARGB tint
-layout(location = 6) in ivec4 Instance;
+layout(location = 6) in uint Material;
+// per instance: palette start and material table start (in texels), packed light, packed overlay
+layout(location = 7) in ivec4 Instance;
+layout(location = 8) in vec4 Tint;
 
 uniform samplerBuffer ClayPalette;
 
@@ -51,7 +54,10 @@ layout(location = 4) out vec4 lightMapColor;
 layout(location = 5) out vec4 overlayColor;
 #endif
 
+// uv within the image (offset by the scroll when the material wraps), its atlas rectangle, and whether it wraps
 layout(location = 6) out vec2 texCoord0;
+layout(location = 7) flat out vec4 spriteRect;
+layout(location = 8) flat out float spriteWrap;
 
 mat4 palette(uint entry) {
     int texel = Instance.x + int(entry) * 4;
@@ -71,8 +77,7 @@ void main() {
 
     vec3 position = (skin * vec4(Position, 1.0)).xyz;
     vec3 normal = normalize(mat3(skin) * Normal);
-    vec4 tint = vec4((Instance.w >> 16) & 0xFF, (Instance.w >> 8) & 0xFF, Instance.w & 0xFF, (Instance.w >> 24) & 0xFF) / 255.0;
-    vec4 color = Color * tint;
+    vec4 color = Color * Tint;
 
     gl_Position = ProjMat * ModelViewMat * vec4(position, 1.0);
 
@@ -90,12 +95,16 @@ void main() {
 #endif
 
 #if !defined(EMISSIVE) && !defined(OIT_ALPHA_ONLY)
-    lightMapColor = sample_lightmap(Sampler2, unpack(Instance.y));
+    lightMapColor = sample_lightmap(Sampler2, unpack(Instance.z));
 #endif
 
 #if !defined(NO_OVERLAY) && !defined(OIT_ALPHA_ONLY)
-    overlayColor = texelFetch(Sampler1, unpack(Instance.z), 0);
+    overlayColor = texelFetch(Sampler1, unpack(Instance.w), 0);
 #endif
 
-    texCoord0 = UV0;
+    int material = Instance.y + int(Material) * 2;
+    spriteRect = texelFetch(ClayPalette, material);
+    vec4 scroll = texelFetch(ClayPalette, material + 1);
+    spriteWrap = scroll.z;
+    texCoord0 = scroll.z > 0.5 ? UV0 + scroll.xy : clamp(UV0, 0.0, 1.0);
 }

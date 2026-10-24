@@ -11,7 +11,10 @@ It also has a cinematic camera for cutscenes and dramatic ability shots, since t
 - glTF binary (`.glb`) models as **blocks and items**, through ordinary model json files. Blockstate rotations, display transforms and parents work as you'd expect.
 - **Entity and block entity** rendering with `ClayModel`, drawn from meshes kept on the GPU, with an optional low-detail model for distant entities.
 - **Blender animations and armatures**: play, loop and crossfade the actions you made in Blender, with skinned (bone-deformed) meshes, and move individual parts from code on top.
-- Textures, vertex colors, cutout and translucent materials, double-sided faces and emissive (glowing) materials, all read from the Blender material.
+- Textures, vertex colors, cutout and translucent materials, double-sided faces and emissive (glowing) materials, all read from the Blender material. Animated textures everywhere, and scrolling textures on entities.
+- **Per-instance looks**: tint a copy of a model or swap its textures without loading it twice.
+- **Sockets**: empties in Blender become attachment points for held items, other models and particles, and follow the animation.
+- **Block shapes** made from the model, for collision and outlines, on the server too.
 - A **cinematic camera** (`ClayCamera`) that takes over the player's view for a scripted shot.
 
 ## Adding Clay to your mod
@@ -92,10 +95,14 @@ Clay reads a handful of things from each material and maps them to what vanilla 
 | Backface Culling turned off | Drawn from both sides |
 | Emission color with strength above 0 | Fullbright, so it glows in the dark |
 | Custom property `clay_ao = false` on the material | No ambient occlusion |
+| Custom property `clay_frametime = 4` on the material | Animated texture: the image is a vertical strip of square frames, each shown for 4 ticks, like a vanilla `.mcmeta` |
+| Custom property `clay_scroll = [0.5, 0]` on the material | The texture scrolls by half its width per second (entities only, see below) |
 
 Normal, roughness, metallic and occlusion maps are ignored because vanilla shaders have no use for them. Clay logs a warning when it skips one so you know it happened.
 
-Keep UVs inside the 0 to 1 range. Textures share an atlas, so tiling can't work: a face whose UVs fit inside one tile gets wrapped back into place, and anything larger gets clamped.
+Custom properties need **Include > Custom Properties** ticked in the exporter. Objects named `collision` and empties named `socket_...` have special meanings, described in [Block shapes](#block-shapes) and [Sockets](#sockets).
+
+Keep UVs inside the 0 to 1 range. Textures share an atlas, so tiling can't work: a face whose UVs fit inside one tile gets wrapped back into place, and anything larger gets clamped. Scrolling textures are the exception: they wrap around within their own image.
 
 ## Blocks and items
 
@@ -200,6 +207,42 @@ Skinning takes up to four bones per vertex, as glTF allows. The GPU renderer def
 
 `MODEL.animations()` lists the clips and `MODEL.duration(clip)` gives a clip's length in seconds.
 
+### Tints, texture swaps and scrolling
+
+A `ClayInstance` is one copy of a model with its own look, and its own `ClayAnimator`. Many instances share one loaded model, so a hundred differently colored golems cost the same as a hundred identical ones.
+
+```java
+final ClayInstance look = MODEL.instance()
+    .tint(0xFFFF8080)                                                  // ARGB, multiplied into every color
+    .texture("cloth", Identifier.withDefaultNamespace("block/red_wool")) // material name -> any block atlas sprite
+    .scroll("water", 0, 0.25f);                                          // a quarter of the image per second
+
+look.animator().play("walk");
+MODEL.submit(pose, collector, light, overlay, distanceSq, look);
+```
+
+Materials are named as in Blender. A swapped texture can be any sprite in the block atlas: vanilla block textures, your own block textures, or another Clay model's images (`ClayAssets.spriteId(model, imageIndex)`). Scrolling replaces the material's own `clay_scroll` speed, and `scroll(material, 0, 0)` stops it. Scrolling follows game time, so it pauses with the game.
+
+Block and item models can't scroll (they're baked into the chunk once), so Clay warns if one has `clay_scroll`. Animated textures (`clay_frametime`) work everywhere, because the block atlas animates them like any vanilla texture.
+
+### Sockets
+
+Name an empty `socket_hand` in Blender (any name after `socket_`) and Clay gives you its position in the current pose, moving with the animation:
+
+```java
+static final ClayModel.Socket HAND = MODEL.socket("hand");
+
+pose.pushPose();
+HAND.apply(pose, animator);              // pose is now at the socket
+pose.scale(0.5f, 0.5f, 0.5f);
+itemRenderer.submit(...);                 // or another ClayModel, a light, ...
+pose.popPose();
+
+Vector3f tip = HAND.position(animator, new Vector3f());  // model space, e.g. for particles
+```
+
+`transform(animator, dest)` gives you the whole matrix, and `exists()` tells you whether the model has the socket. Pass `null` for the rest pose.
+
 ### Renderers
 
 Clay has two ways of drawing a `ClayModel`, and picks one by itself:
@@ -210,6 +253,25 @@ Clay has two ways of drawing a `ClayModel`, and picks one by itself:
 The GPU renderer is used unless a shader-pack mod (Iris, Oculus, OptiFabric) is installed or the graphics driver can't compile Clay's shader. Then Clay logs one warning and uses the CPU renderer. You can force either with the JVM argument `-Dclay.renderer=gpu` or `-Dclay.renderer=cpu` (`auto` is the default).
 
 In game, `/clay` shows which renderer is active and why, how much GPU memory Clay uses, and every entity model drawn since the last reload with its quad count. `/clay renderer auto|gpu|cpu` switches renderers on the fly, which is handy for comparing them.
+
+## Block shapes
+
+`ClayShapes` turns a model into a `VoxelShape` for your block's `getShape` and `getCollisionShape`:
+
+```java
+static final VoxelShape SHAPE = ClayShapes.fromModel(Identifier.fromNamespaceAndPath("mymod", "statue"));
+
+@Override
+protected VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
+    return SHAPE;
+}
+```
+
+- If the model has objects named `collision` (or `collision.001` and so on), each one becomes a box around it. Make them simple boxes in Blender and hide them; they're never drawn.
+- Otherwise Clay voxelizes the model at 2 pixels per voxel: every voxel the surface passes through, and everything it encloses.
+- `ClayShapes.bounds(model)` is a single box around the model, and `ClayShapes.voxelize(model, cellsPerBlock)` voxelizes at another resolution.
+
+Shapes face the way the model does in Blender (+Y in Blender is north in game). For other facings, turn them with vanilla's `Shapes.rotateHorizontal(shape)`. They're read from your mod's jar, so they work on dedicated servers, but resource packs can't change them.
 
 ## Cinematic camera
 
@@ -243,10 +305,12 @@ Block and item models are baked once per resource reload into Fabric Renderer me
 
 The one limit worth knowing about is the polygon budget for blocks. **Keep block models under about 220 quads.** Every placed block copies its quads into the mesh of its chunk section, and each section uploads through a fixed 98 MB buffer. At 112 bytes per quad, a section completely filled with a 220-quad block just fits. Go much heavier and the game crashes with `Cannot fit allocation ... into staging buffer` once enough copies end up in one section (a 9,000-quad block fails at around 90 copies). If you need a high-poly block, give it a simple block model and draw the detailed version with a block entity and `ClayModel`, using `.lod()` for distance.
 
+Clay logs a warning with the model's name and quad count when a block model goes over the budget. Add `"simplify": true` to the model json and Clay merges nearby vertices until it fits (or give a number, `"simplify": 150`, for your own limit). It keeps the silhouette but loses detail, so check how it looks; a proper low-poly version from Blender always looks better.
+
 ## Known limitations
 
 - Shape keys (morph targets) aren't supported. Clay skips them with a warning in the log.
-- Only embedded PNG textures are supported, and textures can't tile because they live in an atlas.
+- Only embedded PNG textures are supported, and textures can't tile because they live in an atlas (scrolling textures on entities are the exception).
 
 ## Building from source
 

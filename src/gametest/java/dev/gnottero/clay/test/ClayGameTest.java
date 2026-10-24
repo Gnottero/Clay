@@ -7,6 +7,8 @@ import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
 import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestServerContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
+import net.minecraft.core.BlockPos;
+import net.minecraft.resources.Identifier;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
 
@@ -63,6 +65,41 @@ public final class ClayGameTest implements FabricClientGameTest {
 			world.getConnection().waitForChunksRender();
 			compareRenderers(context, "skinned");
 			ClayTestScene.skinned = null;
+
+			// per-instance looks, with the orb block (simplified, shaped by ClayShapes) in front. Time is frozen so scrolling
+			// textures hold still between the two screenshots; the animated screen is swapped for a still texture.
+			server.runCommand("tick freeze");
+			server.runCommand("setblock 0 -60 -1 clay_test:orb");
+			// a voxelized ball: solid in the middle, empty in the corners of the block
+			var boxes = server.computeOnServer(s -> s.overworld().getBlockState(new BlockPos(0, -60, -1)).getShape(s.overworld(), new BlockPos(0, -60, -1)).toAabbs());
+			if (boxes.stream().noneMatch(b -> b.contains(0.5, 0.5, 0.5)) || boxes.stream().anyMatch(b -> b.contains(0.05, 0.05, 0.05) || b.contains(0.95, 0.95, 0.05))) {
+				throw new AssertionError("orb shape " + boxes);
+			}
+			Identifier gold = Identifier.withDefaultNamespace("block/gold_block"), still = Identifier.withDefaultNamespace("block/diamond_block");
+			context.runOnClient(mc -> {
+				ClayTestScene.LOOKS.clear();
+				ClayTestScene.LOOKS.add(ClayTestScene.MATERIALS.instance().texture("screen", still));
+				ClayTestScene.LOOKS.add(ClayTestScene.MATERIALS.instance().texture("screen", still).tint(0xFFFF6060));
+				ClayTestScene.LOOKS.add(ClayTestScene.MATERIALS.instance().texture("screen", still).texture("paint", gold));
+				ClayTestScene.LOOKS.add(ClayTestScene.MATERIALS.instance().texture("screen", still).scroll("scroll", 0.3f, 0.7f));
+			});
+			ClayTestScene.materials = new Vec3(-4, -60, 1.5);
+			context.waitTicks(2);
+			world.getConnection().waitForChunksRender();
+			compareRenderers(context, "materials");
+
+			// the animated screen and the scrolling panel move with time
+			context.runOnClient(mc -> {
+				ClayTestScene.LOOKS.clear();
+				ClayTestScene.LOOKS.add(ClayTestScene.MATERIALS.instance());
+			});
+			ClayTestScene.materials = new Vec3(2.5, -60, 2.5);
+			server.runCommand("tick unfreeze");
+			Path before = context.takeScreenshot("animated_0");
+			context.waitTicks(7);
+			Path after = context.takeScreenshot("animated_1");
+			if (differing(before, after) < 0.001) throw new AssertionError("animated and scrolling textures didn't move");
+			ClayTestScene.materials = null;
 		}
 	}
 

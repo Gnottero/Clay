@@ -17,6 +17,7 @@ import net.minecraft.world.phys.AABB;
 import org.jspecify.annotations.Nullable;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
+import org.joml.Vector3f;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -84,32 +85,56 @@ public final class ClayModel {
 	/** Also draws the block breaking cracks over the model when {@code crumbling} (a block entity's {@code state.breakProgress}) is set. */
 	public void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq,
 					   Map<String, ? extends Matrix4fc> nodeTransforms, ModelFeatureRenderer.@Nullable CrumblingOverlay crumbling) {
-		submit(pose, collector, light, overlay, distanceToCameraSq, null, nodeTransforms, crumbling);
+		submit(pose, collector, light, overlay, distanceToCameraSq, null, nodeTransforms, null, crumbling);
 	}
 
 	/** Draws the pose {@code animator} is at: its clips, and its overrides on top. */
 	public void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq, ClayAnimator animator) {
-		submit(pose, collector, light, overlay, distanceToCameraSq, animator, animator.overrides(), null);
+		submit(pose, collector, light, overlay, distanceToCameraSq, animator, animator.overrides(), null, null);
 	}
 
 	public void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq, ClayAnimator animator,
 					   ModelFeatureRenderer.@Nullable CrumblingOverlay crumbling) {
-		submit(pose, collector, light, overlay, distanceToCameraSq, animator, animator.overrides(), crumbling);
+		submit(pose, collector, light, overlay, distanceToCameraSq, animator, animator.overrides(), null, crumbling);
+	}
+
+	/** Draws {@code instance}: its animator's pose, with its tint, textures and scrolling. */
+	public void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq, ClayInstance instance) {
+		submit(pose, collector, light, overlay, distanceToCameraSq, instance, null);
+	}
+
+	public void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq, ClayInstance instance,
+					   ModelFeatureRenderer.@Nullable CrumblingOverlay crumbling) {
+		ClayAnimator animator = instance.animator();
+		submit(pose, collector, light, overlay, distanceToCameraSq, animator, animator.overrides(), instance, crumbling);
 	}
 
 	private void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq, @Nullable ClayAnimator animator,
-						Map<String, ? extends Matrix4fc> nodeTransforms, ModelFeatureRenderer.@Nullable CrumblingOverlay crumbling) {
+						Map<String, ? extends Matrix4fc> nodeTransforms, @Nullable ClayInstance instance, ModelFeatureRenderer.@Nullable CrumblingOverlay crumbling) {
 		for (Lod lod : lods) {
 			if (distanceToCameraSq >= lod.minDistanceSq) {
-				lod.model.submit(pose, collector, light, overlay, 0, animator, nodeTransforms, crumbling);
+				lod.model.submit(pose, collector, light, overlay, 0, animator, nodeTransforms, instance, crumbling);
 				return;
 			}
 		}
 		Baked b = baked();
 		if (b == null) return;
 		Matrix4f[] palette = pose(b.rig, animator, nodeTransforms);
-		ClayRenderers.active().submit(b.mesh, palette, pose.last(), collector, light, overlay, -1);
+		double seconds = scrollClock();
+		b.mesh.defaultMaterials(seconds, b.materials);
+		if (instance != null) instance.apply(b.mesh, atlas(), seconds, b.materials);
+		ClayRenderers.active().submit(b.mesh, palette, b.materials, pose.last(), collector, light, overlay, instance == null ? -1 : instance.tint());
 		if (crumbling != null) CpuRenderer.submitCrumbling(b.mesh, palette, pose.last(), collector, crumbling);
+	}
+
+	/** Seconds of game time, which pauses with the game: what scrolling textures move with. */
+	private static double scrollClock() {
+		Minecraft mc = Minecraft.getInstance();
+		return mc.level == null ? 0 : (mc.level.getGameTime() + (double) mc.getDeltaTracker().getGameTimeDeltaPartialTick(false)) / 20;
+	}
+
+	private static TextureAtlas atlas() {
+		return Minecraft.getInstance().getAtlasManager().getAtlasOrThrow(AtlasIds.BLOCKS);
 	}
 
 	/** Samples the animator's clips (if any) and builds the palette, without allocating. */
@@ -140,6 +165,55 @@ public final class ClayModel {
 		return b == null ? java.util.Set.of() : java.util.Collections.unmodifiableSet(b.rig.clips().keySet());
 	}
 
+	/**
+	 * The Blender empty named {@code socket_<name>}: a point on the model that follows its animation, for attaching
+	 * held items, other models or particles. The socket is looked up when used, so it can be made before resources load.
+	 */
+	public Socket socket(String name) {
+		return new Socket("socket_" + name);
+	}
+
+	/** See {@link #socket}. */
+	public final class Socket {
+		private final String node;
+
+		private Socket(String node) {
+			this.node = node;
+		}
+
+		/** Whether the model has this socket (false until resources are loaded). */
+		public boolean exists() {
+			Baked b = baked();
+			return b != null && b.rig.node(node) >= 0;
+		}
+
+		/**
+		 * The socket's model-space transform in {@code animator}'s pose (or the rest pose when null), with its overrides,
+		 * into {@code dest}. Identity if the socket doesn't exist.
+		 */
+		public Matrix4f transform(@Nullable ClayAnimator animator, Matrix4f dest) {
+			Baked b = baked();
+			int i = b == null ? -1 : b.rig.node(node);
+			if (i < 0) return dest.identity();
+			return dest.set(pose(b.rig, animator, animator == null ? Map.of() : animator.overrides())[i]);
+		}
+
+		/** Moves {@code pose} onto the socket, so whatever you submit next is attached to it. Push the pose first. */
+		public void apply(PoseStack pose, @Nullable ClayAnimator animator) {
+			pose.mulPose(transform(animator, new Matrix4f()));
+		}
+
+		/** Where the socket is in model space, e.g. to spawn particles there after turning it like your entity. */
+		public Vector3f position(@Nullable ClayAnimator animator, Vector3f dest) {
+			return transform(animator, new Matrix4f()).getTranslation(dest);
+		}
+	}
+
+	/** A new instance (animator, tint, texture swaps) of this model. */
+	public ClayInstance instance() {
+		return new ClayInstance(this);
+	}
+
 	/** A new animator for one instance of this model. */
 	public ClayAnimator animator() {
 		return new ClayAnimator(this);
@@ -149,7 +223,7 @@ public final class ClayModel {
 	private @Nullable Baked baked() {
 		Glb glb = ClayAssets.get(id);
 		if (glb == null) return null;
-		TextureAtlas atlas = Minecraft.getInstance().getAtlasManager().getAtlasOrThrow(AtlasIds.BLOCKS);
+		TextureAtlas atlas = atlas();
 		if (baked == null || baked.glb != glb || baked.atlasMarker != atlas.missingSprite()) baked = new Baked(glb, atlas, mesh(id, glb, atlas));
 		return baked;
 	}
@@ -179,14 +253,16 @@ public final class ClayModel {
 		final Glb glb;
 		final TextureAtlasSprite atlasMarker;
 		final ClayMesh mesh;
-		/** Poses this model; its palette is scratch reused by every submit. */
+		/** Poses this model; its palette is scratch reused by every submit, like the material table. */
 		final Rig rig;
+		final float[] materials;
 
 		Baked(Glb glb, TextureAtlas atlas, ClayMesh mesh) {
 			this.glb = glb;
 			this.atlasMarker = atlas.missingSprite();
 			this.mesh = mesh;
 			this.rig = new Rig(glb);
+			this.materials = new float[mesh.slots * ClayMesh.MATERIAL_FLOATS];
 		}
 	}
 }

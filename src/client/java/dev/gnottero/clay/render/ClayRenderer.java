@@ -9,9 +9,10 @@ public interface ClayRenderer {
 	/**
 	 * @param palette the model-space transform of each palette entry (nodes, then skin joints); only the first
 	 *                {@code mesh.paletteSize} are read, and not after this call returns
+	 * @param materials the material table ({@link ClayMesh#MATERIAL_FLOATS} floats per slot), not read after this call returns
 	 * @param tint    ARGB multiplied into every vertex color
 	 */
-	void submit(ClayMesh mesh, Matrix4fc[] palette, PoseStack.Pose pose, SubmitNodeCollector collector, int light, int overlay, int tint);
+	void submit(ClayMesh mesh, Matrix4fc[] palette, float[] materials, PoseStack.Pose pose, SubmitNodeCollector collector, int light, int overlay, int tint);
 
 	String name();
 }

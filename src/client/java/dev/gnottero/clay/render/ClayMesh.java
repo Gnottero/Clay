@@ -18,8 +18,13 @@ import java.util.function.IntFunction;
 /**
  * A .glb baked for entity rendering, shared by both renderers. Every quad of every node sits in one vertex array, sorted
  * into one {@link Part} per material kind. Each vertex follows up to four entries of a {@link Rig}'s palette by weight:
- * its node, or the joints of its skin. Its position and normal are in the space those entries map from. Quads keep 4 consecutive vertices so the CPU renderer
- * can stream them as quads; the GPU renderer draws them through {@link #indices} as triangles.
+ * its node, or the joints of its skin. Its position and normal are in the space those entries map from. Quads keep 4
+ * consecutive vertices so the CPU renderer can stream them as quads; the GPU renderer draws them through {@link #indices}
+ * as triangles.
+ * <p>
+ * UVs stay as the model has them (0-1 across the material's image). Which atlas rectangle they land in is decided per
+ * instance and per frame by a material table ({@link #MATERIAL_FLOATS} floats per {@link #slots slot}), which is how
+ * texture swaps, scrolling and tints work without copying the mesh. Objects named {@code collision} are left out.
  */
 public final class ClayMesh {
 	/** How a part is drawn: blended or cutout, culled or double-sided, lit or full-bright. */
@@ -28,11 +33,19 @@ public final class ClayMesh {
 	/** A run of quads drawn the same way: vertices {@code [firstVertex, +vertexCount)}, triangles {@code [firstIndex, +indexCount)}. */
 	public record Part(ClayMesh mesh, Kind kind, int firstVertex, int vertexCount, int firstIndex, int indexCount) {}
 
+	/** Per material slot in a material table: atlas rectangle u0 v0 u1 v1, then uv offset u v, wrap (1 or 0), unused. */
+	public static final int MATERIAL_FLOATS = 8;
+
 	public final Identifier id;
 	public final int vertexCount, paletteSize;
-	/** Per vertex: xyz, normal xyz, atlas uv, ARGB color. */
+	/** Per vertex: xyz, normal xyz, uv within the material's image, ARGB color, material slot. */
 	public final float[] positions, normals, uvs;
-	public final int[] colors;
+	public final int[] colors, materials;
+	/** Material slots: the glTF materials shifted by one, slot 0 being the default material. */
+	public final int slots;
+	public final String[] slotNames;
+	/** Per slot: the atlas rectangle of its image, and how fast it scrolls (clay_scroll, widths per second). */
+	public final float[] rects, scrollSpeeds;
 	/** Per vertex: 4 palette indices and their weights (0-255, normalized when used, like the vertex shader's UNORM input). */
 	public final int[] joints;
 	public final byte[] weights;
@@ -54,8 +67,19 @@ public final class ClayMesh {
 		this.paletteSize = rig.paletteSize;
 		Map<Kind, List<Piece>> byKind = new LinkedHashMap<>();
 		int vertices = 0, triangles = 0;
+		slots = glb.materials.size() + 1;
+		slotNames = new String[slots];
+		rects = new float[slots * 4];
+		scrollSpeeds = new float[slots * 2];
+		for (int m = -1; m < glb.materials.size(); m++) {
+			Glb.Material mat = glb.material(m);
+			slotNames[m + 1] = mat.name();
+			System.arraycopy(uvRect.apply(m), 0, rects, (m + 1) * 4, 4);
+			if (mat.scroll() != null) System.arraycopy(mat.scroll(), 0, scrollSpeeds, (m + 1) * 2, 2);
+		}
 		for (int n = 0; n < glb.nodes.size(); n++) {
 			Glb.Node node = glb.nodes.get(n);
+			if (Glb.isCollision(node)) continue;
 			for (Glb.Primitive primitive : node.primitives()) {
 				Glb.Material mat = glb.material(primitive.material());
 				Kind kind = new Kind(mat.alphaMode() == Glb.AlphaMode.BLEND, !mat.doubleSided(), mat.emissive());
@@ -74,6 +98,7 @@ public final class ClayMesh {
 		normals = new float[vertices * 3];
 		uvs = new float[vertices * 2];
 		colors = new int[vertices];
+		materials = new int[vertices];
 		joints = new int[vertices * 4];
 		weights = new byte[vertices * 4];
 		indices = new int[triangles * 3];
@@ -81,11 +106,10 @@ public final class ClayMesh {
 		for (List<Piece> pieces : byKind.values()) {
 			int firstVertex = v, firstIndex = i;
 			for (Piece piece : pieces) {
-				float[] rect = uvRect.apply(piece.material);
 				for (Quads.Quad quad : piece.quads) {
 					Quads.wrapUvs(quad.v());
 					for (int k = 0; k < 4; k++) {
-						put(v + k, quad.v(), k * Quads.STRIDE, rect, piece.node);
+						put(v + k, quad.v(), k * Quads.STRIDE, piece.material + 1, piece.node);
 						if (piece.skinOffset >= 0) skin(v + k, piece.primitive, quad.source()[k], piece.skinOffset);
 					}
 					indices[i++] = v; indices[i++] = v + 1; indices[i++] = v + 2;
@@ -127,11 +151,11 @@ public final class ClayMesh {
 		}
 	}
 
-	private void put(int v, float[] q, int o, float[] rect, int node) {
+	private void put(int v, float[] q, int o, int slot, int node) {
 		System.arraycopy(q, o, positions, v * 3, 3);
 		System.arraycopy(q, o + 3, normals, v * 3, 3);
-		uvs[v * 2] = rect[0] + (rect[2] - rect[0]) * Math.clamp(q[o + 6], 0f, 1f);
-		uvs[v * 2 + 1] = rect[1] + (rect[3] - rect[1]) * Math.clamp(q[o + 7], 0f, 1f);
+		System.arraycopy(q, o + 6, uvs, v * 2, 2);
+		materials[v] = slot;
 		colors[v] = argb(q[o + 11], q[o + 8], q[o + 9], q[o + 10]);
 		joints[v * 4] = node;
 		weights[v * 4] = (byte) 255;
@@ -146,6 +170,36 @@ public final class ClayMesh {
 	private static int argb(float a, float r, float g, float b) {
 		return Math.round(Math.clamp(a, 0f, 1f) * 255) << 24 | Math.round(Math.clamp(r, 0f, 1f) * 255) << 16
 			| Math.round(Math.clamp(g, 0f, 1f) * 255) << 8 | Math.round(Math.clamp(b, 0f, 1f) * 255);
+	}
+
+	/** The material slot named {@code name}, or -1. */
+	public int slot(String name) {
+		for (int i = 0; i < slots; i++) if (slotNames[i].equals(name)) return i;
+		return -1;
+	}
+
+	/**
+	 * Fills {@code table} with the model's own materials at {@code seconds} on the scroll clock: each image's atlas
+	 * rectangle, scrolled by its clay_scroll speed.
+	 */
+	public void defaultMaterials(double seconds, float[] table) {
+		for (int i = 0; i < slots; i++) {
+			System.arraycopy(rects, i * 4, table, i * MATERIAL_FLOATS, 4);
+			scroll(table, i, scrollSpeeds[i * 2], scrollSpeeds[i * 2 + 1], seconds);
+		}
+	}
+
+	/** Sets slot {@code i} of a material table to scroll by {@code (u, v)} widths per second; it wraps only while it scrolls. */
+	public static void scroll(float[] table, int i, float u, float v, double seconds) {
+		int o = i * MATERIAL_FLOATS;
+		// fractions keep the offset precise however long the clock has run
+		table[o + 4] = (float) frac(u * seconds);
+		table[o + 5] = (float) frac(v * seconds);
+		table[o + 6] = u != 0 || v != 0 ? 1 : 0;
+	}
+
+	private static double frac(double x) {
+		return x - Math.floor(x);
 	}
 
 	public boolean isOnGpu() {
