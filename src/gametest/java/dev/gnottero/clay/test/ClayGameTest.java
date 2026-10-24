@@ -1,5 +1,6 @@
 package dev.gnottero.clay.test;
 
+import dev.gnottero.clay.ClayAnimator;
 import dev.gnottero.clay.render.ClayRenderers;
 import dev.gnottero.clay.render.GpuRenderer;
 import net.fabricmc.fabric.api.client.gametest.v1.FabricClientGameTest;
@@ -7,6 +8,7 @@ import net.fabricmc.fabric.api.client.gametest.v1.context.ClientGameTestContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestServerContext;
 import net.fabricmc.fabric.api.client.gametest.v1.context.TestSingleplayerContext;
 import net.minecraft.world.phys.Vec3;
+import org.joml.Matrix4f;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -26,18 +28,50 @@ public final class ClayGameTest implements FabricClientGameTest {
 			server.runCommand("time set noon");
 			server.runCommand("tp @a 0.5 -59 -3 0 20");
 			ClayTestScene.showcase = new Vec3(0.5, -60, 0.5);
-			context.runOnClient(mc -> { if (!mc.gui.hud.isHidden()) mc.gui.hud.toggle(); });
+			context.runOnClient(mc -> {
+				if (!mc.gui.hud.isHidden()) mc.gui.hud.toggle();
+				// a short view distance finishes loading quickly, so far chunks popping in can't differ between screenshots
+				mc.options.renderDistance().set(2);
+			});
 			world.getConnection().waitForChunksRender();
 			context.waitTicks(20);
 
 			for (boolean oit : new boolean[] {false, true}) {
 				context.runOnClient(mc -> mc.options.improvedTransparency().set(oit));
 				context.waitTicks(5);
+				world.getConnection().waitForChunksRender();
 				compareRenderers(context, oit ? "showcase_oit" : "showcase");
 			}
 			context.runOnClient(mc -> mc.options.improvedTransparency().set(false));
 			ClayTestScene.showcase = null;
+
+			// each clip frozen part way through, a crossfade, and a node override on top of a clip
+			context.runOnClient(mc -> {
+				ClayTestScene.POSES.clear();
+				ClayTestScene.POSES.add(pose("bend", 0.4f));
+				ClayTestScene.POSES.add(pose("hop", 0.6f));
+				ClayTestScene.POSES.add(pose("sway", 0.3f));
+				ClayTestScene.POSES.add(pose("spin", 0.25f));
+				ClayAnimator fade = pose("bend", 0.5f);
+				fade.play("sway", true, 0.4f);
+				fade.update(0.7f);
+				ClayTestScene.POSES.add(fade);
+				ClayTestScene.POSES.add(pose("hop", 0.6f).override("upper", new Matrix4f().rotateX(-0.8f)));
+			});
+			ClayTestScene.skinned = new Vec3(-3.25, -60, 0.5);
+			context.waitTicks(2);
+			world.getConnection().waitForChunksRender();
+			compareRenderers(context, "skinned");
+			ClayTestScene.skinned = null;
 		}
+	}
+
+	/** An animator holding {@code clip} at {@code seconds}. */
+	private static ClayAnimator pose(String clip, float seconds) {
+		ClayAnimator animator = ClayTestScene.SKINNED.animator().play(clip);
+		animator.update(0);
+		animator.update(seconds);
+		return animator;
 	}
 
 	/** Screenshots the scene with each renderer; they must agree up to rounding along edges. */

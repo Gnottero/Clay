@@ -178,14 +178,22 @@ public final class GpuRenderer implements ClayRenderer {
 		instance.light = light;
 		instance.overlay = overlay;
 		instance.tint = tint;
-		for (ClayMesh.Part part : mesh.parts) {
-			collector.submitCustom(part.kind().translucent() ? SubmitRenderPhases.TRANSLUCENT_CUSTOM_GEOMETRY : SubmitRenderPhases.SOLID, new Submit(part, instance));
+		if (instance.mesh != mesh) {
+			instance.mesh = mesh;
+			instance.submits = new Submit[mesh.parts.size()];
+			for (int i = 0; i < instance.submits.length; i++) instance.submits[i] = new Submit(mesh.parts.get(i), instance);
+		}
+		for (Submit submit : instance.submits) {
+			collector.submitCustom(submit.part.kind().translucent() ? SubmitRenderPhases.TRANSLUCENT_CUSTOM_GEOMETRY : SubmitRenderPhases.SOLID, submit);
 		}
 	}
 
 	/** One instance's posed palette and lighting for this frame; pooled, returned when the frame has been drawn. */
 	private static final class Instance {
 		float[] palette = new float[16];
+		/** The mesh this instance last drew and its submit per part, kept so a pooled instance submits without allocating. */
+		@Nullable ClayMesh mesh;
+		Submit[] submits = new Submit[0];
 		int size, light, overlay, tint;
 		/** Where this frame's palette buffer holds it, in texels; -1 until a feature renderer has written it. */
 		int base = -1;

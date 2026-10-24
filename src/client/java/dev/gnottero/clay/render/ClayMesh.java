@@ -2,6 +2,7 @@ package dev.gnottero.clay.render;
 
 import dev.gnottero.clay.gltf.Glb;
 import dev.gnottero.clay.gltf.Quads;
+import dev.gnottero.clay.gltf.Rig;
 import net.minecraft.resources.Identifier;
 import net.minecraft.world.phys.AABB;
 import org.joml.Matrix4f;
@@ -16,8 +17,8 @@ import java.util.function.IntFunction;
 
 /**
  * A .glb baked for entity rendering, shared by both renderers. Every quad of every node sits in one vertex array, sorted
- * into one {@link Part} per material kind. Each vertex follows up to four palette entries (a node, or a skin joint) by
- * weight; its position and normal are in the space of those entries. Quads keep 4 consecutive vertices so the CPU renderer
+ * into one {@link Part} per material kind. Each vertex follows up to four entries of a {@link Rig}'s palette by weight:
+ * its node, or the joints of its skin. Its position and normal are in the space those entries map from. Quads keep 4 consecutive vertices so the CPU renderer
  * can stream them as quads; the GPU renderer draws them through {@link #indices} as triangles.
  */
 public final class ClayMesh {
@@ -41,17 +42,17 @@ public final class ClayMesh {
 	/** The GPU renderer's buffers, uploaded on first draw. */
 	GpuRenderer.@Nullable Buffers gpu;
 
-	/** Quads of one material on one node, before they are sorted into parts. */
-	private record Piece(Kind kind, int node, int material, List<Quads.Quad> quads) {}
+	/** Quads of one primitive, before they are sorted into parts; {@code skinOffset} >= 0 when its vertices follow a skin. */
+	private record Piece(Kind kind, int node, int material, List<Quads.Quad> quads, Glb.Primitive primitive, int skinOffset) {}
 
 	/**
 	 * @param uvRect for a material index (-1 = default), the {u0, v0, u1, v1} atlas rectangle its 0-1 UVs map into
 	 */
 	public ClayMesh(Identifier id, Glb glb, IntFunction<float[]> uvRect) {
 		this.id = id;
-		this.paletteSize = glb.nodes.size();
+		Rig rig = new Rig(glb);
+		this.paletteSize = rig.paletteSize;
 		Map<Kind, List<Piece>> byKind = new LinkedHashMap<>();
-		Vector3f min = new Vector3f(Float.MAX_VALUE), max = new Vector3f(-Float.MAX_VALUE), tmp = new Vector3f();
 		int vertices = 0, triangles = 0;
 		for (int n = 0; n < glb.nodes.size(); n++) {
 			Glb.Node node = glb.nodes.get(n);
@@ -59,19 +60,14 @@ public final class ClayMesh {
 				Glb.Material mat = glb.material(primitive.material());
 				Kind kind = new Kind(mat.alphaMode() == Glb.AlphaMode.BLEND, !mat.doubleSided(), mat.emissive());
 				List<Quads.Quad> quads = Quads.build(glb, primitive, new Matrix4f());
-				byKind.computeIfAbsent(kind, k -> new ArrayList<>()).add(new Piece(kind, n, primitive.material(), quads));
+				int skinOffset = node.skin() >= 0 && primitive.joints() != null ? rig.skinOffset[node.skin()] : -1;
+				byKind.computeIfAbsent(kind, k -> new ArrayList<>()).add(new Piece(kind, n, primitive.material(), quads, primitive, skinOffset));
 				for (Quads.Quad quad : quads) {
 					vertices += 4;
 					triangles += degenerate(quad.v()) ? 1 : 2;
-					for (int v = 0; v < 4; v++) {
-						node.global().transformPosition(tmp.set(quad.x(v), quad.y(v), quad.z(v)));
-						min.min(tmp);
-						max.max(tmp);
-					}
 				}
 			}
 		}
-		bounds = min.x > max.x ? new AABB(0, 0, 0, 0, 0, 0) : new AABB(min.x, min.y, min.z, max.x, max.y, max.z);
 
 		vertexCount = vertices;
 		positions = new float[vertices * 3];
@@ -88,13 +84,46 @@ public final class ClayMesh {
 				float[] rect = uvRect.apply(piece.material);
 				for (Quads.Quad quad : piece.quads) {
 					Quads.wrapUvs(quad.v());
-					for (int k = 0; k < 4; k++) put(v + k, quad.v(), k * Quads.STRIDE, rect, piece.node);
+					for (int k = 0; k < 4; k++) {
+						put(v + k, quad.v(), k * Quads.STRIDE, rect, piece.node);
+						if (piece.skinOffset >= 0) skin(v + k, piece.primitive, quad.source()[k], piece.skinOffset);
+					}
 					indices[i++] = v; indices[i++] = v + 1; indices[i++] = v + 2;
 					if (!degenerate(quad.v())) { indices[i++] = v; indices[i++] = v + 2; indices[i++] = v + 3; }
 					v += 4;
 				}
 			}
 			parts.add(new Part(this, pieces.getFirst().kind, firstVertex, v - firstVertex, firstIndex, i - firstIndex));
+		}
+		bounds = restBounds(rig);
+	}
+
+	/** Bounds of every vertex placed by the rest-pose palette, the same way the renderers place them. */
+	private AABB restBounds(Rig rig) {
+		if (vertexCount == 0) return new AABB(0, 0, 0, 0, 0, 0);
+		float[] palette = new float[paletteSize * 16], skin = new float[16], p = new float[3];
+		ClaySkin.pose(new Matrix4f(), rig.build(null), paletteSize, palette);
+		Vector3f min = new Vector3f(Float.MAX_VALUE), max = new Vector3f(-Float.MAX_VALUE), at = new Vector3f();
+		for (int v = 0; v < vertexCount; v++) {
+			ClaySkin.blend(palette, joints, weights, v, skin);
+			ClaySkin.transformPosition(skin, positions[v * 3], positions[v * 3 + 1], positions[v * 3 + 2], p, 0);
+			min.min(at.set(p));
+			max.max(at);
+		}
+		return new AABB(min.x, min.y, min.z, max.x, max.y, max.z);
+	}
+
+	/** Ties vertex {@code v} to up to four joints of a skin, with its glTF weights quantized to bytes as the GPU reads them. */
+	private void skin(int v, Glb.Primitive primitive, int source, int skinOffset) {
+		int total = 0;
+		for (int k = 0; k < 4; k++) {
+			int w = Math.round(Math.clamp(primitive.weights()[source * 4 + k], 0f, 1f) * 255);
+			joints[v * 4 + k] = skinOffset + primitive.joints()[source * 4 + k];
+			weights[v * 4 + k] = (byte) w;
+			total += w;
+		}
+		if (total == 0) { // unweighted: follow the first joint rather than collapse to the origin
+			weights[v * 4] = (byte) 255;
 		}
 	}
 

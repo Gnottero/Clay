@@ -16,8 +16,12 @@ public final class Quads {
 	/** Floats per vertex: x y z nx ny nz u v r g b a. */
 	public static final int STRIDE = 12;
 
-	/** {@code v} holds 4 vertices of {@link #STRIDE} floats. */
-	public record Quad(float[] v, int material) {
+	/** {@code v} holds 4 vertices of {@link #STRIDE} floats; {@code source} their indices in the primitive (for skin weights). */
+	public record Quad(float[] v, int material, int[] source) {
+		public Quad(float[] v, int material) {
+			this(v, material, new int[4]);
+		}
+
 		public float x(int i) { return v[i * STRIDE]; }
 		public float y(int i) { return v[i * STRIDE + 1]; }
 		public float z(int i) { return v[i * STRIDE + 2]; }
@@ -61,7 +65,7 @@ public final class Quads {
 			float[] v = new float[4 * STRIDE];
 			for (int i = 0; i < 4; i++) System.arraycopy(verts, quad[i] * STRIDE, v, i * STRIDE, STRIDE);
 			if (p.normals() == null) flatNormals(v);
-			out.add(new Quad(v, p.material()));
+			out.add(new Quad(v, p.material(), quad));
 		}
 		return out;
 	}

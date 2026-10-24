@@ -9,7 +9,8 @@ It also has a cinematic camera for cutscenes and dramatic ability shots, since t
 ## What you get
 
 - glTF binary (`.glb`) models as **blocks and items**, through ordinary model json files. Blockstate rotations, display transforms and parents work as you'd expect.
-- **Entity and block entity** rendering with `ClayModel`, drawn from meshes kept on the GPU, including per-part transforms for animation and an optional low-detail model for distant entities.
+- **Entity and block entity** rendering with `ClayModel`, drawn from meshes kept on the GPU, with an optional low-detail model for distant entities.
+- **Blender animations and armatures**: play, loop and crossfade the actions you made in Blender, with skinned (bone-deformed) meshes, and move individual parts from code on top.
 - Textures, vertex colors, cutout and translucent materials, double-sided faces and emissive (glowing) materials, all read from the Blender material.
 - A **cinematic camera** (`ClayCamera`) that takes over the player's view for a scripted shot.
 
@@ -169,6 +170,36 @@ Every object in your Blender scene becomes a node, named after the object. The m
 
 For block entities there's one more overload of `submit` that takes the render state's `breakProgress`. Pass it along and the block breaking cracks show up on your model while the player mines it.
 
+### Animation
+
+Animations made in Blender come along in the `.glb`: object animations (moving, turning and scaling objects) and armatures with skinned meshes. Each Blender action becomes a clip with the action's name. Export with **Animation** enabled and **Animation mode: Actions**, and push each action you want to keep to its own NLA track, or Blender only exports the active one. Linear, constant (step) and Bezier interpolation all come across; untick **Always Sample Animations** to keep them as they are instead of baking every frame.
+
+Give each entity its own `ClayAnimator`, advance it with your clock, tell it what to play, and draw with it:
+
+```java
+// in your entity (client side)
+final ClayAnimator animator = MyRenderer.MODEL.animator();
+
+// in the renderer
+ClayAnimator anim = state.animator;
+anim.update((state.ageInTicks) / 20f);                    // seconds on any clock you like
+if (state.attacking) anim.play("attack", false, 0.1f);    // play once, fading in over 0.1 s
+else anim.play(state.walking ? "walk" : "idle", true, 0.25f);
+anim.override("head", new Matrix4f().rotateY(state.headYaw));
+MODEL.submit(pose, collector, state.lightCoords, OverlayTexture.NO_OVERLAY, state.distanceToCameraSq, anim);
+```
+
+- `play(clip)` loops, `play(clip, false)` plays once and holds the last frame; `finished()` tells you when it got there. Asking for the clip that's already playing does nothing, so you can call it every frame.
+- The third argument crossfades from whatever was showing, in seconds. `stop(seconds)` fades back to the rest pose.
+- `speed(2)` plays twice as fast, a negative speed plays backwards.
+- `override(node, matrix)` moves a node on top of the animation, in its parent's space, the same way the map in the plain `submit` does. Its children and the skin follow.
+- Time only moves when you call `update`, so pausing the game or freezing the entity freezes the animation too.
+- Posing an animated model doesn't create garbage, so many animated entities don't stress the garbage collector.
+
+Skinning takes up to four bones per vertex, as glTF allows. The GPU renderer deforms the mesh in its vertex shader, the CPU renderer does the same math in Java, and both give the same picture.
+
+`MODEL.animations()` lists the clips and `MODEL.duration(clip)` gives a clip's length in seconds.
+
 ### Renderers
 
 Clay has two ways of drawing a `ClayModel`, and picks one by itself:
@@ -214,7 +245,7 @@ The one limit worth knowing about is the polygon budget for blocks. **Keep block
 
 ## Known limitations
 
-- There's no skeletal or Blender animation support. Animate by passing node transforms instead.
+- Shape keys (morph targets) aren't supported. Clay skips them with a warning in the log.
 - Only embedded PNG textures are supported, and textures can't tile because they live in an atlas.
 
 ## Building from source

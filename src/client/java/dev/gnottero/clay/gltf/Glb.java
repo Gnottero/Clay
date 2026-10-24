@@ -15,9 +15,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 /**
- * Minimal glTF 2.0 binary (.glb) reader: just what Blender's exporter emits for static meshes.
+ * Minimal glTF 2.0 binary (.glb) reader: just what Blender's exporter emits for meshes, skins and node animations.
  * Pure Java (Gson + JOML only) so it can be unit-tested without a game instance.
  */
 public final class Glb {
@@ -28,18 +29,47 @@ public final class Glb {
 		static final Material DEFAULT = new Material("default", new float[] {1, 1, 1, 1}, -1, AlphaMode.OPAQUE, false, false, true);
 	}
 
-	/** Mesh-local triangle data. {@code normals}/{@code uvs}/{@code colors} may be null. Colors are RGBA floats. */
-	public record Primitive(float[] positions, float[] normals, float[] uvs, float[] colors, int[] indices, int material) {
+	/**
+	 * Mesh-local triangle data. {@code normals}/{@code uvs}/{@code colors} may be null. Colors are RGBA floats.
+	 * {@code joints}/{@code weights} (4 per vertex, JOINTS_0/WEIGHTS_0) are set on skinned meshes: joints index the skin's joint list.
+	 */
+	public record Primitive(float[] positions, float[] normals, float[] uvs, float[] colors, int[] indices, int material, int[] joints, float[] weights) {
 		public int vertexCount() {
 			return positions.length / 3;
 		}
 	}
 
-	/** Nodes are ordered parents-first; {@code parent} indexes this list (-1 = root). */
-	public record Node(String name, int parent, Matrix4f local, Matrix4f global, List<Primitive> primitives) {}
+	/** Nodes are ordered parents-first; {@code parent} indexes this list (-1 = root), {@code skin} {@link #skins} (-1 = none). */
+	public record Node(String name, int parent, Matrix4f local, Matrix4f global, List<Primitive> primitives, int skin) {}
+
+	/** {@code joints} index {@link #nodes}; a vertex bound to joint j moves with {@code joint global * inverseBind[j]}. */
+	public record Skin(String name, int[] joints, Matrix4f[] inverseBind) {}
+
+	public enum Path {
+		TRANSLATION(3), ROTATION(4), SCALE(3);
+
+		public final int components;
+
+		Path(int components) {
+			this.components = components;
+		}
+	}
+
+	public enum Interpolation { LINEAR, STEP, CUBICSPLINE }
+
+	/**
+	 * One animated property of one node ({@link #nodes} index). {@code values} holds {@code path.components} floats per key,
+	 * or for CUBICSPLINE three groups per key: in-tangent, value, out-tangent.
+	 */
+	public record Channel(int node, Path path, Interpolation interpolation, float[] times, float[] values) {}
+
+	/** A named clip; {@code duration} is the last key time of any channel. */
+	public record Animation(String name, float duration, List<Channel> channels) {}
 
 	public final List<Node> nodes = new ArrayList<>();
 	public final List<Material> materials = new ArrayList<>();
+	public final List<Skin> skins = new ArrayList<>();
+	public final List<Animation> animations = new ArrayList<>();
 	/** Raw encoded image bytes (PNG), indexed like the glTF {@code images} array. Null when not embedded. */
 	public final List<byte[]> images = new ArrayList<>();
 	/** Non-fatal problems the caller should log. */
@@ -80,6 +110,8 @@ public final class Glb {
 	private final JsonObject json;
 	private final ByteBuffer bin;
 	private boolean[] visited;
+	/** {@link #nodes} index of each glTF node, -1 for nodes outside the scene. */
+	private int[] nodeIndex;
 	private long spentBytes;
 
 	private Glb(JsonObject json, ByteBuffer bin) throws IOException {
@@ -109,7 +141,69 @@ public final class Glb {
 		if (scenes.isEmpty()) return;
 		JsonObject scene = scenes.get(json.has("scene") ? json.get("scene").getAsInt() : 0).getAsJsonObject();
 		visited = new boolean[array(json, "nodes").size()];
+		nodeIndex = new int[visited.length];
+		Arrays.fill(nodeIndex, -1);
 		for (JsonElement root : array(scene, "nodes")) addNode(root.getAsInt(), -1, 0);
+
+		for (JsonElement e : array(json, "skins")) skins.add(skin(e.getAsJsonObject()));
+		for (Node node : nodes) {
+			if (node.skin < 0) continue;
+			if (node.skin >= skins.size()) throw new IOException("Node '" + node.name + "' uses missing skin " + node.skin);
+			int count = skins.get(node.skin).joints.length;
+			for (Primitive p : node.primitives) {
+				if (p.joints == null) continue;
+				for (int j : p.joints) if (j < 0 || j >= count) throw new IOException("Node '" + node.name + "': joint " + j + " out of range (" + count + " joints)");
+			}
+		}
+		for (JsonElement e : array(json, "animations")) {
+			Animation animation = animation(e.getAsJsonObject());
+			if (animation != null) animations.add(animation);
+		}
+	}
+
+	private Skin skin(JsonObject s) throws IOException {
+		String name = s.has("name") ? s.get("name").getAsString() : "skin" + skins.size();
+		JsonArray jointArray = array(s, "joints");
+		int[] joints = new int[jointArray.size()];
+		for (int i = 0; i < joints.length; i++) joints[i] = node(jointArray.get(i).getAsInt(), "Skin '" + name + "'");
+		Matrix4f[] inverseBind = new Matrix4f[joints.length];
+		float[] raw = s.has("inverseBindMatrices") ? accessor(s.get("inverseBindMatrices").getAsInt()) : null;
+		if (raw != null && raw.length != joints.length * 16) throw new IOException("Skin '" + name + "' has " + raw.length / 16 + " inverse bind matrices for " + joints.length + " joints");
+		for (int i = 0; i < joints.length; i++) inverseBind[i] = raw == null ? new Matrix4f() : new Matrix4f().set(raw, i * 16);
+		return new Skin(name, joints, inverseBind);
+	}
+
+	/** The {@link #nodes} index of glTF node {@code gltfIndex}, which must be in the scene. */
+	private int node(int gltfIndex, String user) throws IOException {
+		if (gltfIndex < 0 || gltfIndex >= nodeIndex.length || nodeIndex[gltfIndex] < 0) throw new IOException(user + " uses node " + gltfIndex + ", which is not in the scene");
+		return nodeIndex[gltfIndex];
+	}
+
+	private Animation animation(JsonObject a) throws IOException {
+		String name = a.has("name") ? a.get("name").getAsString() : "animation" + animations.size();
+		JsonArray samplers = array(a, "samplers");
+		List<Channel> channels = new ArrayList<>();
+		float duration = 0;
+		for (JsonElement e : array(a, "channels")) {
+			JsonObject channel = e.getAsJsonObject(), target = channel.getAsJsonObject("target");
+			String path = target.get("path").getAsString();
+			if (!target.has("node") || !List.of("translation", "rotation", "scale").contains(path)) {
+				warnings.add("Animation '" + name + "': skipping a " + path + " channel (only node translation, rotation and scale are supported)");
+				continue;
+			}
+			JsonObject sampler = samplers.get(channel.get("sampler").getAsInt()).getAsJsonObject();
+			Path p = Path.valueOf(path.toUpperCase(Locale.ROOT));
+			String mode = sampler.has("interpolation") ? sampler.get("interpolation").getAsString() : "LINEAR";
+			if (!List.of("LINEAR", "STEP", "CUBICSPLINE").contains(mode)) throw new IOException("Animation '" + name + "': unknown interpolation " + mode);
+			Interpolation interpolation = Interpolation.valueOf(mode);
+			float[] times = accessor(sampler.get("input").getAsInt()), values = accessor(sampler.get("output").getAsInt());
+			int perKey = p.components * (interpolation == Interpolation.CUBICSPLINE ? 3 : 1);
+			if (times.length == 0 || values.length != times.length * perKey) throw new IOException("Animation '" + name + "': " + path + " channel has " + values.length + " values for " + times.length + " keys");
+			for (int i = 1; i < times.length; i++) if (!(times[i] >= times[i - 1])) throw new IOException("Animation '" + name + "': key times must increase");
+			channels.add(new Channel(node(target.get("node").getAsInt(), "Animation '" + name + "'"), p, interpolation, times, values));
+			duration = Math.max(duration, times[times.length - 1]);
+		}
+		return channels.isEmpty() ? null : new Animation(name, duration, channels);
 	}
 
 	private void addNode(int gltfIndex, int parent, int depth) throws IOException {
@@ -128,6 +222,7 @@ public final class Glb {
 		}
 		Matrix4f global = parent < 0 ? new Matrix4f(local) : new Matrix4f(nodes.get(parent).global()).mul(local);
 
+		nodeIndex[gltfIndex] = nodes.size();
 		List<Primitive> primitives = new ArrayList<>();
 		if (node.has("mesh")) {
 			JsonObject mesh = array(json, "meshes").get(node.get("mesh").getAsInt()).getAsJsonObject();
@@ -139,7 +234,7 @@ public final class Glb {
 
 		String name = node.has("name") ? node.get("name").getAsString() : "node" + gltfIndex;
 		int self = nodes.size();
-		nodes.add(new Node(name, parent, local, global, primitives));
+		nodes.add(new Node(name, parent, local, global, primitives, node.has("skin") ? node.get("skin").getAsInt() : -1));
 		for (JsonElement child : array(node, "children")) addNode(child.getAsInt(), self, depth + 1);
 	}
 
@@ -158,6 +253,15 @@ public final class Glb {
 		int uvSet = material >= 0 ? texCoordSet(material) : 0;
 		float[] uvs = attributes.has("TEXCOORD_" + uvSet) ? accessor(attributes.get("TEXCOORD_" + uvSet).getAsInt()) : null;
 		float[] colors = attributes.has("COLOR_0") ? rgba(attributes.get("COLOR_0").getAsInt()) : null;
+		float[] rawJoints = attributes.has("JOINTS_0") ? accessor(attributes.get("JOINTS_0").getAsInt()) : null;
+		float[] weights = attributes.has("WEIGHTS_0") ? accessor(attributes.get("WEIGHTS_0").getAsInt()) : null;
+		int[] joints = null;
+		if (rawJoints != null && weights != null) {
+			joints = new int[rawJoints.length];
+			for (int i = 0; i < joints.length; i++) joints[i] = (int) rawJoints[i];
+		} else {
+			weights = null;
+		}
 
 		int[] indices;
 		if (p.has("indices")) {
@@ -169,13 +273,14 @@ public final class Glb {
 			Arrays.setAll(indices, i -> i);
 		}
 		int n = positions.length / 3;
-		if (positions.length % 3 != 0 || normals != null && normals.length != n * 3 || uvs != null && uvs.length != n * 2 || colors != null && colors.length != n * 4)
+		if (positions.length % 3 != 0 || normals != null && normals.length != n * 3 || uvs != null && uvs.length != n * 2 || colors != null && colors.length != n * 4
+			|| joints != null && (joints.length != n * 4 || weights.length != n * 4))
 			throw new IOException("Vertex attributes have mismatched counts");
 		for (int i : indices) if (i < 0 || i >= n) throw new IOException("Vertex index " + i + " out of range (" + n + " vertices)");
 		if (material < -1 || material >= materials.size()) throw new IOException("Material " + material + " out of range");
 		// what Quads.build allocates for it: every vertex at full stride, and in the worst case a 4-vertex quad per triangle
 		spend(((long) n * Quads.STRIDE + (long) indices.length / 3 * 4 * Quads.STRIDE) * Float.BYTES);
-		return new Primitive(positions, normals, uvs, colors, indices, material);
+		return new Primitive(positions, normals, uvs, colors, indices, material, joints, weights);
 	}
 
 	private Material material(JsonObject m) throws IOException {
@@ -237,6 +342,7 @@ public final class Glb {
 			case "VEC2" -> 2;
 			case "VEC3" -> 3;
 			case "VEC4" -> 4;
+			case "MAT4" -> 16;
 			default -> throw new IOException("Unsupported accessor type " + a.get("type").getAsString());
 		};
 		int componentType = a.get("componentType").getAsInt();

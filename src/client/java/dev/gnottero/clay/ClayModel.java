@@ -2,6 +2,7 @@ package dev.gnottero.clay;
 
 import com.mojang.blaze3d.vertex.PoseStack;
 import dev.gnottero.clay.gltf.Glb;
+import dev.gnottero.clay.gltf.Rig;
 import dev.gnottero.clay.render.ClayMesh;
 import dev.gnottero.clay.render.ClayRenderers;
 import dev.gnottero.clay.render.CpuRenderer;
@@ -33,6 +34,7 @@ import java.util.Map;
  *     Map.of("head", new Matrix4f().rotateY(headYaw)));
  * }</pre>
  * Node transforms are applied on top of the node's own Blender transform, in its parent's space, by node name.
+ * For Blender animations and skinned meshes, draw with a {@link ClayAnimator} instead.
  * Model space: Blender origin = the entity's feet, 1 Blender unit = 1 block.
  * <p>
  * The model is drawn by the active {@link dev.gnottero.clay.render.ClayRenderer}: from GPU buffers when it can, by
@@ -82,24 +84,65 @@ public final class ClayModel {
 	/** Also draws the block breaking cracks over the model when {@code crumbling} (a block entity's {@code state.breakProgress}) is set. */
 	public void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq,
 					   Map<String, ? extends Matrix4fc> nodeTransforms, ModelFeatureRenderer.@Nullable CrumblingOverlay crumbling) {
+		submit(pose, collector, light, overlay, distanceToCameraSq, null, nodeTransforms, crumbling);
+	}
+
+	/** Draws the pose {@code animator} is at: its clips, and its overrides on top. */
+	public void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq, ClayAnimator animator) {
+		submit(pose, collector, light, overlay, distanceToCameraSq, animator, animator.overrides(), null);
+	}
+
+	public void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq, ClayAnimator animator,
+					   ModelFeatureRenderer.@Nullable CrumblingOverlay crumbling) {
+		submit(pose, collector, light, overlay, distanceToCameraSq, animator, animator.overrides(), crumbling);
+	}
+
+	private void submit(PoseStack pose, SubmitNodeCollector collector, int light, int overlay, double distanceToCameraSq, @Nullable ClayAnimator animator,
+						Map<String, ? extends Matrix4fc> nodeTransforms, ModelFeatureRenderer.@Nullable CrumblingOverlay crumbling) {
 		for (Lod lod : lods) {
 			if (distanceToCameraSq >= lod.minDistanceSq) {
-				lod.model.submit(pose, collector, light, overlay, 0, nodeTransforms, crumbling);
+				lod.model.submit(pose, collector, light, overlay, 0, animator, nodeTransforms, crumbling);
 				return;
 			}
 		}
 		Baked b = baked();
 		if (b == null) return;
+		Matrix4f[] palette = pose(b.rig, animator, nodeTransforms);
+		ClayRenderers.active().submit(b.mesh, palette, pose.last(), collector, light, overlay, -1);
+		if (crumbling != null) CpuRenderer.submitCrumbling(b.mesh, palette, pose.last(), collector, crumbling);
+	}
 
-		for (int i = 0; i < b.nodes.size(); i++) {
-			BakedNode node = b.nodes.get(i);
-			Matrix4f m = node.parent < 0 ? b.palette[i].identity() : b.palette[i].set(b.palette[node.parent]);
-			m.mul(node.local);
-			Matrix4fc extra = nodeTransforms.get(node.name);
-			if (extra != null) m.mul(extra);
+	/** Samples the animator's clips (if any) and builds the palette, without allocating. */
+	private static Matrix4f[] pose(Rig rig, @Nullable ClayAnimator animator, Map<String, ? extends Matrix4fc> nodeTransforms) {
+		rig.reset();
+		if (animator != null) {
+			Glb.Animation clip = animator.clip() == null ? null : rig.clip(animator.clip());
+			if (animator.fading()) {
+				Glb.Animation from = animator.previous() == null ? null : rig.clip(animator.previous());
+				rig.sampleBlend(from, animator.previousTime(), animator.previousLoop(), clip, animator.time(), animator.loop(), animator.weight());
+			} else if (clip != null) {
+				rig.sample(clip, animator.time(), animator.loop());
+			}
 		}
-		ClayRenderers.active().submit(b.mesh, b.palette, pose.last(), collector, light, overlay, -1);
-		if (crumbling != null) CpuRenderer.submitCrumbling(b.mesh, b.palette, pose.last(), collector, crumbling);
+		return rig.build(nodeTransforms);
+	}
+
+	/** Length of the clip {@code name} in seconds, 0 if the model has no such clip or isn't loaded. */
+	public float duration(String name) {
+		Baked b = baked();
+		Glb.Animation clip = b == null ? null : b.rig.clip(name);
+		return clip == null ? 0 : clip.duration();
+	}
+
+	/** The names of the model's animation clips. Empty until resources are loaded. */
+	public java.util.Set<String> animations() {
+		Baked b = baked();
+		return b == null ? java.util.Set.of() : java.util.Collections.unmodifiableSet(b.rig.clips().keySet());
+	}
+
+	/** A new animator for one instance of this model. */
+	public ClayAnimator animator() {
+		return new ClayAnimator(this);
 	}
 
 	/** Lazily (re)builds after every resource reload: the glb instance and the atlas sprites both change then. */
@@ -132,23 +175,18 @@ public final class ClayModel {
 		return MESHES.values().stream().map(Cached::mesh).toList();
 	}
 
-	private record BakedNode(String name, int parent, Matrix4f local) {}
-
 	private static final class Baked {
 		final Glb glb;
 		final TextureAtlasSprite atlasMarker;
 		final ClayMesh mesh;
-		final List<BakedNode> nodes = new ArrayList<>();
-		/** Scratch for this frame's node transforms, reused by every submit. */
-		final Matrix4f[] palette;
+		/** Poses this model; its palette is scratch reused by every submit. */
+		final Rig rig;
 
 		Baked(Glb glb, TextureAtlas atlas, ClayMesh mesh) {
 			this.glb = glb;
 			this.atlasMarker = atlas.missingSprite();
 			this.mesh = mesh;
-			for (Glb.Node node : glb.nodes) nodes.add(new BakedNode(node.name(), node.parent(), node.local()));
-			palette = new Matrix4f[mesh.paletteSize];
-			for (int i = 0; i < palette.length; i++) palette[i] = new Matrix4f();
+			this.rig = new Rig(glb);
 		}
 	}
 }

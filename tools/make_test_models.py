@@ -5,9 +5,14 @@
 Writes to src/gametest/resources/assets/clay_test/clay/:
   showcase   a row of cubes, one per material feature: textured, vertex colors, cutout (double-sided leaf),
              translucent glass and an emissive lamp
+  skinned    a column skinned to a two-bone armature, with a rigid cube spinning beside it. Clips: "bend" (the upper
+             bone bends, linear), "hop" (the armature jumps, step), "sway" (the upper bone sways, bezier, exported as
+             cubic spline) and "spin" (the cube turns, an object animation)
 """
+import math
 import os
 
+import bmesh
 import bpy
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "gametest", "resources", "assets", "clay_test", "clay")
@@ -66,10 +71,10 @@ def cube(name, mat, at, size=0.8):
     return obj
 
 
-def export(name):
+def export(name, **options):
     os.makedirs(OUT, exist_ok=True)
     bpy.ops.export_scene.gltf(filepath=os.path.join(OUT, name + ".glb"), export_format="GLB", export_yup=True,
-                              export_apply=True, export_image_format="AUTO", export_vertex_color="ACTIVE")
+                              export_apply=True, export_image_format="AUTO", export_vertex_color="ACTIVE", **options)
 
 
 def showcase():
@@ -94,4 +99,82 @@ def showcase():
     export("showcase")
 
 
+def action(obj, name, keys, interpolation):
+    """An action on `obj` from (frame, data_path, index, value) keys, pushed to its own NLA track so it exports as a clip."""
+    obj.animation_data_create()
+    act = bpy.data.actions.new(name)
+    obj.animation_data.action = act
+    for frame, path, index, value in keys:
+        target = obj.pose.bones[path[0]] if isinstance(path, tuple) else obj
+        attr = path[1] if isinstance(path, tuple) else path
+        getattr(target, attr)[index] = value
+        target.keyframe_insert(attr, index=index, frame=frame)
+    for fc in act.fcurves if hasattr(act, "fcurves") else [c for layer in act.layers for strip in layer.strips for bag in strip.channelbags for c in bag.fcurves]:
+        for k in fc.keyframe_points:
+            k.interpolation = interpolation
+    track = obj.animation_data.nla_tracks.new()
+    track.name = name
+    track.strips.new(name, int(keys[0][0]), act)
+    obj.animation_data.action = None
+
+
+def skinned():
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+    bpy.context.scene.render.fps = 20
+    stone = material("stone", image("stone", 4, lambda x, y: (0.75, 0.7, 0.6, 1) if (x + y) % 2 else (0.55, 0.5, 0.45, 1)))
+
+    arm_data = bpy.data.armatures.new("rig")
+    rig = bpy.data.objects.new("rig", arm_data)
+    bpy.context.scene.collection.objects.link(rig)
+    bpy.context.view_layer.objects.active = rig
+    bpy.ops.object.mode_set(mode="EDIT")
+    lower = arm_data.edit_bones.new("lower")
+    lower.head, lower.tail = (0, 0, 0), (0, 0, 0.6)
+    upper = arm_data.edit_bones.new("upper")
+    upper.head, upper.tail = (0, 0, 0.6), (0, 0, 1.2)
+    upper.parent = lower
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    mesh = bpy.data.meshes.new("column")
+    bm = bmesh.new()
+    rings = 8
+    for i in range(rings + 1):
+        z = 1.2 * i / rings
+        for x, y in ((-0.15, -0.15), (0.15, -0.15), (0.15, 0.15), (-0.15, 0.15)):
+            bm.verts.new((x, y, z))
+    bm.verts.ensure_lookup_table()
+    for i in range(rings):
+        for k in range(4):
+            a, b = i * 4 + k, i * 4 + (k + 1) % 4
+            bm.faces.new((bm.verts[a], bm.verts[b], bm.verts[b + 4], bm.verts[a + 4]))
+    bm.faces.new([bm.verts[k] for k in (3, 2, 1, 0)])
+    bm.faces.new([bm.verts[rings * 4 + k] for k in range(4)])
+    bm.to_mesh(mesh)
+    for p in mesh.polygons:
+        p.use_smooth = True
+    column = bpy.data.objects.new("column", mesh)
+    bpy.context.scene.collection.objects.link(column)
+    column.data.materials.append(stone)
+    column.parent = rig
+    groups = {name: column.vertex_groups.new(name=name) for name in ("lower", "upper")}
+    for v in mesh.vertices:
+        w = min(1.0, max(0.0, (v.co.z - 0.45) / 0.3))  # blend across the joint at 0.6
+        if w < 1:
+            groups["lower"].add([v.index], 1 - w, "REPLACE")
+        if w > 0:
+            groups["upper"].add([v.index], w, "REPLACE")
+    column.modifiers.new("rig", "ARMATURE").object = rig
+
+    spinner = cube("spinner", stone, (0.8, 0, 0), size=0.3)
+
+    action(rig, "bend", [(0, ("upper", "rotation_quaternion"), 1, 0), (10, ("upper", "rotation_quaternion"), 1, math.sin(math.radians(30))),
+                         (20, ("upper", "rotation_quaternion"), 1, 0)], "LINEAR")
+    action(rig, "hop", [(0, ("lower", "location"), 1, 0), (10, ("lower", "location"), 1, 0.3), (20, ("lower", "location"), 1, 0)], "CONSTANT")
+    action(rig, "sway", [(0, ("upper", "rotation_quaternion"), 3, 0), (10, ("upper", "rotation_quaternion"), 3, math.sin(math.radians(20))),
+                         (20, ("upper", "rotation_quaternion"), 3, 0)], "BEZIER")
+    action(spinner, "spin", [(0, "rotation_euler", 2, 0), (20, "rotation_euler", 2, math.pi)], "LINEAR")
+    export("skinned", export_animation_mode="ACTIONS", export_force_sampling=False, export_def_bones=True)
+
+
 showcase()
+skinned()
